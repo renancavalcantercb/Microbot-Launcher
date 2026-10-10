@@ -217,12 +217,21 @@ module.exports = async function (deps) {
         await shell.openExternal(accountUrl.toString());
         return { success: true };
     });
+    async function authorizeConfiguredReleaseChannel() {
+        if (!releaseUpdateSettings.enabled) return;
+		if (typeof deps.authorizeReleaseChannel === 'function') {
+			await deps.authorizeReleaseChannel(releaseUpdateSettings.channel);
+			return;
+		}
+        await productSessionService.authorizeReleaseChannel(releaseUpdateSettings.channel);
+    }
     ipcMain.handle('client-release:status', async () => clientReleaseStatus());
     ipcMain.handle('client-release:rollback', async () => {
         try {
             if (!releaseUpdateSettings.enabled) {
                 return { error: 'Signed product updates are not enabled' };
             }
+            await authorizeConfiguredReleaseChannel();
             const state = verifiedClientReleaseStore.read();
             const version = state.lastKnownGoodVersion;
             const entry = version ? state.releases[version] : null;
@@ -386,6 +395,7 @@ module.exports = async function (deps) {
                                       return invalidVersionResult(version);
                                   }
                                   try {
+                                      await authorizeConfiguredReleaseChannel();
                                       await verifyClientBeforeLaunch(version);
                                   } catch (error) {
                                       log.error(`Client launch integrity check failed: ${error.message}`);
@@ -466,6 +476,7 @@ module.exports = async function (deps) {
         try {
             const filePath = path.join(microbotDir, `microbot-${version}.jar`);
             if (releaseUpdateSettings.enabled) {
+                await authorizeConfiguredReleaseChannel();
                 const release = await releaseManifestService.fetchCurrent();
                 if (release.client.version !== version) {
                     return {
@@ -585,6 +596,7 @@ module.exports = async function (deps) {
     ipcMain.handle('fetch-launcher-version', async () => {
         if (releaseUpdateSettings.enabled) {
             try {
+                await authorizeConfiguredReleaseChannel();
                 const launcher = (await releaseManifestService.fetchCurrent()).launcher;
                 return launcher ? launcher.version : packageJson.version;
             } catch (error) {
@@ -607,6 +619,7 @@ module.exports = async function (deps) {
     ipcMain.handle('fetch-client-version', async () => {
         if (releaseUpdateSettings.enabled) {
             try {
+                await authorizeConfiguredReleaseChannel();
                 return (await releaseManifestService.fetchCurrent()).client.version;
             } catch (error) {
                 log.error(`Error fetching signed client version: ${error.message}`);
@@ -635,6 +648,7 @@ module.exports = async function (deps) {
             log.info(filePath);
             if (!fs.existsSync(filePath)) return false;
             if (!releaseUpdateSettings.enabled) return true;
+			await authorizeConfiguredReleaseChannel();
 
             const registered = verifiedClientReleaseStore.get(version);
             if (registered) {

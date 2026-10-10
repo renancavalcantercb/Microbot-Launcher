@@ -283,6 +283,10 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 projectDir: path.join(__dirname, '..'),
                 app: {},
                 environment: {},
+				authorizeReleaseChannel: jest.fn().mockResolvedValue({
+					releaseCohort: 'beta',
+					allowedReleaseChannels: ['production', 'staging']
+				}),
                 productConfig: {
                     ...require('../product-config'),
                     updateApiBase: null,

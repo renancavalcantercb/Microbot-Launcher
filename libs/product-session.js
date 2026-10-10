@@ -234,6 +234,23 @@ class ProductSessionService {
         };
     }
 
+    async authorizeReleaseChannel(channel) {
+        if (typeof channel !== 'string' || !channel) {
+            throw new Error('Release channel is not configured');
+        }
+        const status = await this.status();
+        if (!status.authenticated) {
+            throw new Error(status.error || 'Connect your Microbot Cut account to access product releases');
+        }
+        if (!Array.isArray(status.allowedReleaseChannels)) {
+            throw new Error('The authentication service did not provide release channel access');
+        }
+        if (!status.allowedReleaseChannels.includes(channel)) {
+            throw new Error(`Your ${status.releaseCohort || 'stable'} release cohort cannot access the ${channel} channel`);
+        }
+        return status;
+    }
+
     publicStatus(session, access = {}) {
         const status = {
             authenticated: true,
@@ -255,6 +272,17 @@ class ProductSessionService {
         if (Array.isArray(access?.entitlements)) {
             status.entitlements = access.entitlements.filter((value) => typeof value === 'string');
         }
+		if (['stable', 'beta', 'internal'].includes(access?.releaseCohort)) {
+			status.releaseCohort = access.releaseCohort;
+		}
+		if (Array.isArray(access?.allowedReleaseChannels)) {
+			status.allowedReleaseChannels = access.allowedReleaseChannels.filter(
+				(value) => typeof value === 'string'
+			);
+		}
+		if (typeof access?.selectedReleaseChannel === 'string') {
+			status.selectedReleaseChannel = access.selectedReleaseChannel;
+		}
         return status;
     }
 

@@ -93,7 +93,10 @@ describe('product session service', () => {
             get: jest.fn().mockResolvedValue({ data: {
                 device: response.device,
                 plan: { id: 'free', name: 'Free', deviceLimit: 1 },
-                entitlements: ['client.access', 'plugin.cut-runtime-info']
+				entitlements: ['client.access', 'plugin.cut-runtime-info'],
+				releaseCohort: 'beta',
+				allowedReleaseChannels: ['production', 'staging'],
+				selectedReleaseChannel: 'staging'
             } })
         };
         const service = createService(directory, axios);
@@ -104,10 +107,47 @@ describe('product session service', () => {
         expect(status.refreshToken).toBeUndefined();
         expect(status.plan).toEqual({ id: 'free', name: 'Free', deviceLimit: 1 });
         expect(status.entitlements).toEqual(['client.access', 'plugin.cut-runtime-info']);
+		expect(status.releaseCohort).toBe('beta');
+		expect(status.allowedReleaseChannels).toEqual(['production', 'staging']);
+		expect(status.selectedReleaseChannel).toBe('staging');
 
         await service.signout();
         expect(fs.existsSync(path.join(directory, 'product-session.json'))).toBe(false);
     });
+
+	test('authorizes configured channels from the server-provided cohort only', async () => {
+		const response = sessionResponse();
+		const axios = {
+			post: jest.fn().mockResolvedValue({ data: response }),
+			get: jest.fn().mockResolvedValue({ data: {
+				device: response.device,
+				releaseCohort: 'beta',
+				allowedReleaseChannels: ['production', 'staging']
+			} })
+		};
+		const service = createService(directory, axios);
+		await service.activate('mbc_act_TEST-CAFE-ABCD-2345');
+
+		await expect(service.authorizeReleaseChannel('staging')).resolves.toMatchObject({
+			authenticated: true,
+			releaseCohort: 'beta'
+		});
+		await expect(service.authorizeReleaseChannel('internal'))
+			.rejects.toThrow('beta release cohort cannot access the internal channel');
+	});
+
+	test('fails closed when the server omits release channel authorization', async () => {
+		const response = sessionResponse();
+		const axios = {
+			post: jest.fn().mockResolvedValue({ data: response }),
+			get: jest.fn().mockResolvedValue({ data: { device: response.device } })
+		};
+		const service = createService(directory, axios);
+		await service.activate('mbc_act_TEST-CAFE-ABCD-2345');
+
+		await expect(service.authorizeReleaseChannel('staging'))
+			.rejects.toThrow('did not provide release channel access');
+	});
 
     test('migrates a valid legacy session after remote API validation', async () => {
         const response = sessionResponse();

@@ -17,7 +17,10 @@ persistence. Release commands are defined by `npm.cmd run release:client` and
 must follow prepare, immutable stage, explicit promote, and verify.
 
 Staging is currently an operator-selected environment. Server-controlled
-stable/beta/internal cohorts are designed but not implemented yet.
+stable/beta/internal cohorts are now returned by the backend. Signed staging
+release discovery, download, rollback, and launch fail closed unless the
+authenticated account is assigned to `beta` or `internal`. Automatic fallback
+to production remains pending until a signed production channel exists.
 
 <img width="1915" height="1197" alt="image" src="https://github.com/user-attachments/assets/dfa1f620-ed5a-409c-97f0-f2c6e86e9a8a" />
 
