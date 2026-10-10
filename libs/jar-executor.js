@@ -1,9 +1,68 @@
 module.exports = async function (deps) {
-    const { spawn, path, dialog, shell, log, fs, microbotDir, ipcMain, clipboard, packageJson } = deps;
+    const {
+        spawn,
+        path,
+        dialog,
+        shell,
+        log,
+        fs,
+        microbotDir,
+        ipcMain,
+        clipboard,
+        packageJson,
+        accountRepository,
+        productConfig,
+        productSessionService,
+        clientLifecycle,
+        clientReleaseHealth
+    } = deps;
     const os = require('os');
     const javaRuntime = require(path.join(__dirname, 'java-runtime.js'));
+    const { ClientTicketBroker } = require(
+        path.join(__dirname, 'client-ticket-broker.js')
+    );
+    const { buildPluginRepositoryVmArgs } = require(
+        path.join(__dirname, 'plugin-repository-settings.js')
+    );
     const STARTUP_WINDOW_MS = deps.startupWindowMs || 20000;
     const MAX_CAPTURED_STDERR = 64 * 1024;
+    const pluginDevelopmentEnvironmentVariable =
+        productConfig?.pluginDevelopmentEnvironmentVariable ||
+        'MICROBOT_CUT_PLUGIN_DEV';
+    const pluginDevelopmentMode =
+        process.env[pluginDevelopmentEnvironmentVariable] === 'true';
+    const pluginRepositoryEnabledVariable =
+        productConfig?.pluginRepositoryEnvironmentVariables?.enabled ||
+        'MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED';
+    const pluginRepository = pluginDevelopmentMode
+        ? { enabled: false, args: [] }
+        : buildPluginRepositoryVmArgs({ productConfig, log });
+    const productVmArgs = pluginDevelopmentMode
+        ? ['-Dmicrobot.plugins.developmentMode=true']
+        : [];
+    productVmArgs.push(...pluginRepository.args);
+    const clientTicketBroker = deps.clientTicketBroker || new ClientTicketBroker({
+        productSessionService,
+        log,
+        fsModule: fs,
+        pathModule: path,
+        productDataDir: deps.productDataDir || microbotDir,
+        secretStore: deps.brokerSecretStore,
+        onClientHealthy: ({ releaseVersion }) =>
+            clientReleaseHealth?.healthy?.(releaseVersion)
+    });
+    await clientTicketBroker.ensureStarted?.();
+
+    if (pluginDevelopmentMode) {
+        log.warn(
+            `Plugin development mode enabled by ${pluginDevelopmentEnvironmentVariable}.`
+        );
+        if (process.env[pluginRepositoryEnabledVariable] === 'true') {
+            log.warn(
+                `Plugin repository ignored while ${pluginDevelopmentEnvironmentVariable} is enabled.`
+            );
+        }
+    }
 
     const cliRamValue = extractRamValue(process.argv);
     const cliMemory = buildMemoryArgsFromRam(cliRamValue, log, '--ram');
@@ -46,14 +105,20 @@ module.exports = async function (deps) {
 
     ipcMain.handle(
         'open-client',
-        async (event, version, proxy, account, ramPreference) => {
+        async (event, version, proxy, accountId, ramPreference) => {
             try {
                 const jarPath = path.join(microbotDir, `microbot-${version}.jar`);
                 const memoryConfig = selectMemoryArgs(ramPreference);
                 log.info(
                     `Launching client with ${memoryConfig.source} memory settings: ${memoryConfig.args.join(' ')}`
                 );
-                const commandArgs = [...memoryConfig.args, ...GC_FLAGS, '-jar', jarPath];
+                const commandArgs = [
+                    ...memoryConfig.args,
+                    ...GC_FLAGS,
+                    ...productVmArgs,
+                    '-jar',
+                    jarPath
+                ];
 
                 // apply proxy args (done differently depending on client version)
                 const err = addProxyArgs(commandArgs, proxy);
@@ -62,7 +127,18 @@ module.exports = async function (deps) {
                     return { error: err.message };
                 }
 
-                if (account && account.profile) {
+                let account = null;
+                if (accountId) {
+                    if (!accountRepository) {
+                        return { error: 'Account storage is unavailable' };
+                    }
+                    account = accountRepository.getAccountForLaunch(accountId);
+                    if (!account) {
+                        return { error: 'Selected account was not found' };
+                    }
+                }
+
+                if (account?.profile) {
                     commandArgs.push(`-profile=${account.profile}`);
                 }
 
@@ -75,7 +151,23 @@ module.exports = async function (deps) {
                     );
                 }
 
-                checkJavaAndRunJar(commandArgs, accountSecrets(account));
+                const clientAuthorization = await createClientAuthorization(version);
+                clientReleaseHealth?.begin?.(version);
+
+                checkJavaAndRunJar(
+                    commandArgs,
+                    [
+                        ...accountSecrets(account),
+                        clientAuthorization.ticket,
+                        ...clientAuthorization.secrets
+                    ],
+                    {
+                        ...accountLaunchEnvironment(account),
+                        ...clientAuthorization.environment
+                    },
+                    clientAuthorization.release,
+                    version
+                );
                 return { success: true };
             } catch (error) {
                 log.error(error.message);
@@ -95,6 +187,7 @@ module.exports = async function (deps) {
             const commandArgs = [
                 ...memoryConfig.args,
                 ...GC_FLAGS,
+                ...productVmArgs,
                 '-jar',
                 jarPath,
                 '-clean-jagex-launcher'
@@ -141,10 +234,43 @@ module.exports = async function (deps) {
                 );
             }
 
-            checkJavaAndRunJar(commandArgs);
+            try {
+                const clientAuthorization = await createClientAuthorization(version);
+                clientReleaseHealth?.begin?.(version);
+                checkJavaAndRunJar(
+                    commandArgs,
+                    [clientAuthorization.ticket, ...clientAuthorization.secrets],
+                    clientAuthorization.environment,
+                    clientAuthorization.release,
+                    version
+                );
+            } catch (error) {
+                log.error(`Client authorization failed: ${error.message}`);
+                return { error: 'The client could not be authorized. Reconnect your Microbot Cut account.' };
+            }
             return { success: true };
         }
     );
+
+    async function createClientAuthorization(version) {
+        if (!productSessionService) {
+            throw new Error('Product session service is unavailable');
+        }
+        const authorization = await productSessionService.createClientTicket();
+        const brokerGrant = await clientTicketBroker.createGrant({ releaseVersion: version });
+        return {
+            ticket: authorization.ticket,
+            secrets: brokerGrant.secrets,
+            release: brokerGrant.release,
+            environment: {
+                MICROBOT_CUT_CLIENT_TICKET: authorization.ticket,
+                MICROBOT_CUT_PRODUCT_API_BASE_URL: authorization.apiBaseUrl,
+                MICROBOT_CUT_CLIENT_TICKET_KEY_ID: authorization.keyId,
+                MICROBOT_CUT_CLIENT_TICKET_AUDIENCE: authorization.audience,
+                ...brokerGrant.environment
+            }
+        };
+    }
 
     function probeJava(callback) {
         let called = false;
@@ -262,6 +388,9 @@ module.exports = async function (deps) {
      */
     function redactCommandArgs(args) {
         return args.map((a) => {
+            if (a.startsWith('-Dmicrobot.plugins.publicKey=')) {
+                return '-Dmicrobot.plugins.publicKey=<configured>';
+            }
             if (!a.startsWith('-proxy=')) return a;
             const value = a.slice('-proxy='.length);
             try {
@@ -289,9 +418,37 @@ module.exports = async function (deps) {
 
     function accountSecrets(account) {
         if (!account) return [];
-        return [account.displayName, account.accountId, account.profile].filter(
+        return [
+            account.displayName,
+            account.accountId,
+            account.profile,
+            account.sessionId
+        ].filter(
             (value) => typeof value === 'string' && value !== 'Not set' && value !== 'default'
         );
+    }
+
+    function accountLaunchEnvironment(account) {
+        if (!account) return {};
+
+        const values = {
+            JX_CHARACTER_ID: account.accountId,
+            JX_SESSION_ID: account.sessionId,
+            JX_REFRESH_TOKEN: '',
+            JX_DISPLAY_NAME: account.displayName || '',
+            JX_ACCESS_TOKEN: ''
+        };
+
+        for (const [name, value] of Object.entries(values)) {
+            if (typeof value !== 'string' || value.includes('\0')) {
+                throw new Error(`Invalid Jagex launch value for ${name}`);
+            }
+        }
+        if (!values.JX_CHARACTER_ID || !values.JX_SESSION_ID) {
+            throw new Error('The selected account has incomplete Jagex credentials');
+        }
+
+        return values;
     }
 
     function showLaunchProblem(problem, { runtime, executable, stderr, secrets } = {}) {
@@ -339,7 +496,16 @@ module.exports = async function (deps) {
             .catch((err) => log.error(`Failed to show launch problem: ${err.message}`));
     }
 
-    function executeJar(executable, commandArgs, runtime, secrets) {
+    function executeJar(
+        executable,
+        commandArgs,
+        runtime,
+        secrets,
+        launchEnvironment,
+        releaseAuthorization = () => {},
+        launchId = null,
+        releaseVersion = null
+    ) {
         log.info(`${executable} ${redactCommandArgs(commandArgs).join(' ')}`);
 
         /**
@@ -367,8 +533,10 @@ module.exports = async function (deps) {
         try {
             jarProcess = spawn(executable, commandArgs, {
                 detached: true,
+                env: { ...process.env, ...launchEnvironment },
                 ...extraArgs
             });
+            clientLifecycle?.markStarted?.(launchId, jarProcess.pid);
 
             /**
              * We only pipe stdout when debugging, to avoid flooding the
@@ -377,13 +545,15 @@ module.exports = async function (deps) {
              */
             if (process.env.DEBUG && jarProcess.stdout) {
                 jarProcess.stdout.on('data', (data) => {
-                    log.info(`[stdout] ${data}`);
+                    log.info(`[stdout] ${javaRuntime.redactText(data.toString(), { secrets })}`);
                 });
             }
             if (jarProcess.stderr) {
                 if (jarProcess.stderr.setEncoding) jarProcess.stderr.setEncoding('utf8');
                 jarProcess.stderr.on('data', (data) => {
-                    if (process.env.DEBUG) log.info(`[stderr] ${data}`);
+                    if (process.env.DEBUG) {
+                        log.info(`[stderr] ${javaRuntime.redactText(data.toString(), { secrets })}`);
+                    }
                     stderrData += data.toString();
                     if (stderrData.length > MAX_CAPTURED_STDERR) {
                         stderrData = stderrData.slice(-MAX_CAPTURED_STDERR);
@@ -410,28 +580,44 @@ module.exports = async function (deps) {
             }
 
             jarProcess.on('error', (err) => {
+                clientLifecycle?.markFailed?.(launchId);
+                clientReleaseHealth?.fail?.(releaseVersion, `client process error: ${err.message}`);
+                releaseAuthorization();
                 log.error(`[error] ${err.message}`);
                 clearTimeout(startupTimer);
                 report(javaRuntime.classifyLaunchFailure({ error: err }));
             });
 
             jarProcess.on('close', (code, signal) => {
+                clientLifecycle?.markStopped?.(launchId);
+                releaseAuthorization();
                 clearTimeout(startupTimer);
                 const elapsed = Date.now() - startedAt;
                 log.info(`JAR exited with code ${code} after ${elapsed}ms`);
                 if (elapsed <= STARTUP_WINDOW_MS && code !== 0) {
+                    clientReleaseHealth?.fail?.(
+                        releaseVersion,
+                        `client exited during startup with code ${code}`
+                    );
                     report(javaRuntime.classifyLaunchFailure({ code, signal, stderr: stderrData }));
                 }
             });
         } catch (error) {
+            clientLifecycle?.markFailed?.(launchId);
+            clientReleaseHealth?.fail?.(releaseVersion, `client process error: ${error.message}`);
+            releaseAuthorization();
             log.error(`[error] ${error.message}`);
             report(javaRuntime.classifyLaunchFailure({ error }));
         }
     }
 
-    function checkJavaAndRunJar(commandArgs, secrets = []) {
+    function checkJavaAndRunJar(commandArgs, secrets = [], launchEnvironment = {}, releaseAuthorization = () => {}, releaseVersion = null) {
+        const launchId = clientLifecycle?.beginLaunch?.() ?? null;
         probeJava(({ runtime, problem }) => {
             if (problem) {
+                clientLifecycle?.markFailed?.(launchId);
+                clientReleaseHealth?.fail?.(releaseVersion, 'compatible Java runtime was not found');
+                releaseAuthorization();
                 showLaunchProblem(problem, { stderr: problem.stderr, secrets });
                 return;
             }
@@ -442,6 +628,9 @@ module.exports = async function (deps) {
             });
             evaluation.warnings.forEach((warning) => log.warn(warning.message));
             if (!evaluation.compatible) {
+                clientLifecycle?.markFailed?.(launchId);
+                clientReleaseHealth?.fail?.(releaseVersion, 'configured Java runtime is incompatible');
+                releaseAuthorization();
                 showLaunchProblem(
                     {
                         kind: 'incompatible-java',
@@ -461,7 +650,16 @@ module.exports = async function (deps) {
             }
             const executable = javaRuntime.launcherExecutable(runtime, process.platform, fs.existsSync);
             log.info('Java runtime is compatible, running the JAR...');
-            executeJar(executable, launchArgs, runtime, secrets);
+            executeJar(
+                executable,
+                launchArgs,
+                runtime,
+                secrets,
+                launchEnvironment,
+                releaseAuthorization,
+                launchId,
+                releaseVersion
+            );
         });
     }
 

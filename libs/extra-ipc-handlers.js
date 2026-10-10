@@ -32,12 +32,25 @@ module.exports = async function (app, ipcMain, window, log, openLocation) {
 
     ipcMain.handle('close-launcher', async () => {
         try {
-            if (app) {
+            if (window && !window.isDestroyed()) {
+                window.close();
+            } else if (app) {
                 app.quit();
             }
             return { success: true };
         } catch (error) {
             log?.error('Error closing launcher:', error.message);
+            return { error: error.message };
+        }
+    });
+
+    ipcMain.handle('relaunch-launcher', async () => {
+        try {
+            app.relaunch();
+            app.exit(0);
+            return { success: true };
+        } catch (error) {
+            log?.error('Error relaunching launcher:', error.message);
             return { error: error.message };
         }
     });

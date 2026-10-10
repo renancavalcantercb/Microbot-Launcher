@@ -1,40 +1,15 @@
 module.exports = async function (deps) {
-    const { fs, path, microbotDir, ipcMain, log } = deps;
+    const { fs, path, microbotDir, ipcMain, log, accountRepository } = deps;
 
     const filePath = path.resolve(microbotDir, 'accounts.json');
 
     ipcMain.handle('read-accounts', async () => {
         try {
-            if (fs.existsSync(filePath)) {
-                const data = fs.readFileSync(filePath, 'utf8');
-                let accounts = JSON.parse(data);
-                accounts.sort(
-                    (a, b) => new Date(b.createdOn) - new Date(a.createdOn)
-                );
-                // Use a Set to track unique display names
-                const uniqueDisplayNames = new Set();
-
-                // Filter the accounts array
-                return accounts.filter((account) => {
-                    if (uniqueDisplayNames.has(account.displayName)) {
-                        // If the displayName is already in the set, skip this account
-                        return false;
-                    } else {
-                        // Otherwise, add the displayName to the set and include this account
-                        if (!account.displayName) {
-                            account.displayName = 'Not set';
-                            return true;
-                        } else {
-                            uniqueDisplayNames.add(account.displayName);
-                            return true;
-                        }
-                    }
-                });
-            } else {
-                // File doesn't exist, return an empty array
+            if (!accountRepository.exists()) {
                 log.info('Accounts file does not exist, returning empty array');
                 return [];
             }
+            return accountRepository.listPublicAccounts();
         } catch (error) {
             log.error(error.message);
             return { error: error.message };
@@ -43,9 +18,8 @@ module.exports = async function (deps) {
 
     ipcMain.handle('remove-accounts', async () => {
         try {
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
-            }
+            accountRepository.removeAll();
+            return { success: true };
         } catch (error) {
             log.error(error.message);
             return { error: error.message };
@@ -58,29 +32,12 @@ module.exports = async function (deps) {
                 return { error: 'Invalid account id' };
             }
 
-            if (!fs.existsSync(filePath)) {
+            if (!accountRepository.exists()) {
                 return { error: 'Accounts file does not exist' };
             }
-
-            const data = fs.readFileSync(filePath, 'utf8');
-            let accounts = [];
-
-            try {
-                accounts = JSON.parse(data);
-            } catch (parseError) {
-                log.error(parseError.message);
-                return { error: 'Accounts file is corrupted or unreadable' };
-            }
-
-            const updatedAccounts = accounts.filter(
-                (account) => account.accountId !== accountId
-            );
-
-            if (updatedAccounts.length === accounts.length) {
+            if (!accountRepository.deleteAccount(accountId)) {
                 return { error: 'Account not found' };
             }
-
-            fs.writeFileSync(filePath, JSON.stringify(updatedAccounts, null, 2));
             return { success: true };
         } catch (error) {
             log.error(error.message);
@@ -175,23 +132,13 @@ module.exports = async function (deps) {
             `Setting profile for Jagex account: ${accountID} to ${profile}`
         );
         try {
-            if (fs.existsSync(filePath)) {
-                const data = fs.readFileSync(filePath, 'utf8');
-                let accounts = JSON.parse(data);
-                const account = accounts.find(
-                    (acc) => acc.accountId === accountID
-                );
-                if (account) {
-                    account.profile = profile;
-                    fs.writeFileSync(
-                        filePath,
-                        JSON.stringify(accounts, null, 2)
-                    );
-                    return { success: true };
-                } else {
-                    return { error: 'Account not found' };
-                }
+            if (!accountRepository.exists()) {
+                return { error: 'Accounts file does not exist' };
             }
+            if (!accountRepository.setProfile(accountID, profile)) {
+                return { error: 'Account not found' };
+            }
+            return { success: true };
         } catch (error) {
             log.error(error.message);
             return { error: error.message };

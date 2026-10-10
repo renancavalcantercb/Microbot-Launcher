@@ -7,29 +7,329 @@ module.exports = async function (deps) {
         path,
         log,
         dialog,
+        shell,
         fs,
         projectDir,
-        app
+        app,
+        safeStorage,
+        productDataDir,
+        legacyDataDir,
+        mainWindow,
+        getMainWindow
     } = deps;
 
-    const url = 'https:/microbot.cloud';
-    const filestorage = 'https://files.microbot.cloud';
+    const productConfig =
+        deps.productConfig ||
+        require(path.join(projectDir, 'product-config.js'));
+    const url = productConfig.updateApiBase;
+    const filestorage = productConfig.updateFilesBase;
+    const { buildReleaseUpdateSettings } = require(path.join(
+        projectDir,
+        'libs',
+        'release-update-settings.js'
+    ));
+    const { ReleaseManifestService } = require(path.join(
+        projectDir,
+        'libs',
+        'release-manifest-service.js'
+    ));
+    const { downloadVerifiedArtifact } = require(path.join(
+        projectDir,
+        'libs',
+        'verified-artifact-download.js'
+    ));
+    const { VerifiedClientReleaseStore } = require(path.join(
+        projectDir,
+        'libs',
+        'verified-client-release-store.js'
+    ));
+    const releaseUpdateSettings = buildReleaseUpdateSettings({
+        environment: deps.environment || process.env,
+        productConfig,
+        allowEnvironmentConfiguration:
+            deps.allowReleaseEnvironmentConfiguration ??
+            (deps.environment || process.env).DEBUG === 'true',
+        log
+    });
+    const releaseManifestService = new ReleaseManifestService({
+        axios,
+        productDataDir: productDataDir || microbotDir,
+        settings: releaseUpdateSettings,
+        log
+    });
+    const verifiedClientReleaseStore = new VerifiedClientReleaseStore({
+        fs,
+        productDataDir: productDataDir || microbotDir,
+        log
+    });
+    function selectedClientVersion() {
+        try {
+            const properties = JSON.parse(
+                fs.readFileSync(path.join(microbotDir, 'resource_versions.json'), 'utf8')
+            );
+            return properties.version_pref && properties.version_pref !== '0.0.0'
+                ? properties.version_pref
+                : properties.client || null;
+        } catch (_) {
+            return null;
+        }
+    }
 
-    const { startAuthFlow, cancelAuthFlow } = require(path.join(
+    function clientReleaseStatus() {
+        return {
+            enabled: releaseUpdateSettings.enabled,
+            channel: releaseUpdateSettings.channel || null,
+            selectedVersion: selectedClientVersion(),
+            ...verifiedClientReleaseStore.status()
+        };
+    }
+
+    function publishClientReleaseStatus() {
+        const activeWindow = typeof getMainWindow === 'function'
+            ? getMainWindow()
+            : mainWindow;
+        if (!activeWindow || activeWindow.isDestroyed()) return;
+        activeWindow.webContents.send('client-release:changed', clientReleaseStatus());
+    }
+    const { ClientReleaseHealth } = require(path.join(
+        projectDir,
+        'libs',
+        'client-release-health.js'
+    ));
+    const clientReleaseHealth = new ClientReleaseHealth({
+        fs,
+        microbotDir,
+        releaseStore: verifiedClientReleaseStore,
+        log,
+        timeoutMs: deps.clientHealthTimeoutMs,
+        onChanged: publishClientReleaseStatus
+    });
+    if (releaseUpdateSettings.enabled) {
+        log.info(
+            `Signed product updates enabled on ${releaseUpdateSettings.channel} channel.`
+        );
+    }
+    const { DataDirectoryImporter } = require(path.join(
+        projectDir,
+        'libs',
+        'data-directory-importer.js'
+    ));
+    const dataDirectoryImporter =
+        productDataDir && legacyDataDir
+            ? new DataDirectoryImporter({
+                  fs,
+                  path,
+                  productDataDir,
+                  legacyDataDir,
+                  productId: productConfig.productId,
+                  log
+              })
+            : null;
+
+    ipcMain.handle('data-directory-status', async () =>
+        dataDirectoryImporter
+            ? dataDirectoryImporter.status()
+            : { error: 'Data directory importer is unavailable' }
+    );
+    ipcMain.handle('import-legacy-data', async () => {
+        if (!dataDirectoryImporter) {
+            return { error: 'Data directory importer is unavailable' };
+        }
+        try {
+            return dataDirectoryImporter.importLegacyData();
+        } catch (error) {
+            log.error(`Legacy data import failed: ${error.message}`);
+            return { error: error.message };
+        }
+    });
+
+    const oauthJagex = require(path.join(
         projectDir,
         'libs',
         'oauth-jagex.js'
     ));
+    const { startAuthFlow, cancelAuthFlow } = oauthJagex;
     const {
         listClientJars,
         markClientDownloaded,
         isSafeClientVersion
     } = require(path.join(projectDir, 'libs', 'client-jars.js'));
+    const { AccountRepository } = require(path.join(
+        projectDir,
+        'libs',
+        'account-repository.js'
+    ));
+    const { ElectronSafeStorageSecretStore } = require(path.join(
+        projectDir,
+        'libs',
+        'account-secret-store.js'
+    ));
+    const secretStore = safeStorage
+        ? new ElectronSafeStorageSecretStore(safeStorage)
+        : null;
+    const { ProductSessionService } = require(path.join(
+        projectDir,
+        'libs',
+        'product-session.js'
+    ));
+    const { InstallationIdentity } = require(path.join(
+        projectDir,
+        'libs',
+        'installation-identity.js'
+    ));
+    const installationIdentity = new InstallationIdentity({
+        fs,
+        path,
+        productDataDir: productDataDir || microbotDir
+    });
+    const productSessionService = new ProductSessionService({
+        axios,
+        fs,
+        path,
+        productDataDir: productDataDir || microbotDir,
+        productConfig,
+        packageJson,
+        secretStore,
+        installationIdentity,
+        log,
+        onSessionInvalidated: (status) => {
+            const activeWindow = typeof getMainWindow === 'function'
+                ? getMainWindow()
+                : mainWindow;
+            if (!activeWindow || activeWindow.isDestroyed()) return;
+            activeWindow.webContents.send('product-session:changed', status);
+        }
+    });
+    ipcMain.handle('product-session:activate', async (_event, code) =>
+        productSessionService.activate(code)
+    );
+    ipcMain.handle('product-session:status', async () =>
+        productSessionService.status()
+    );
+    ipcMain.handle('product-session:signout', async () =>
+        productSessionService.signout()
+    );
+    ipcMain.handle('product-session:open-account', async () => {
+        const accountUrl = new URL(productSessionService.apiBaseUrl);
+        accountUrl.pathname = '/';
+        accountUrl.search = '';
+        accountUrl.hash = '';
+        await shell.openExternal(accountUrl.toString());
+        return { success: true };
+    });
+    ipcMain.handle('client-release:status', async () => clientReleaseStatus());
+    ipcMain.handle('client-release:rollback', async () => {
+        try {
+            if (!releaseUpdateSettings.enabled) {
+                return { error: 'Signed product updates are not enabled' };
+            }
+            const state = verifiedClientReleaseStore.read();
+            const version = state.lastKnownGoodVersion;
+            const entry = version ? state.releases[version] : null;
+            if (!entry || entry.health !== 'healthy') {
+                return { error: 'No healthy client release is available for rollback' };
+            }
+            assertRegisteredReleaseIsSigned(entry);
+            const filePath = path.join(microbotDir, `microbot-${version}.jar`);
+            await verifiedClientReleaseStore.verifyFile(entry, filePath);
+            clientReleaseHealth.selectRollback(version);
+            log.info(`Manually selected last-known-good client ${version}.`);
+            publishClientReleaseStatus();
+            return { success: true, version, status: clientReleaseStatus() };
+        } catch (error) {
+            log.error(`Manual client rollback failed: ${error.message}`);
+            return { error: error.message };
+        }
+    });
+    const accountRepository =
+        deps.accountRepository ||
+        new AccountRepository({ fs, path, microbotDir, log, secretStore });
+    if (secretStore && typeof accountRepository.migrateLegacy === 'function') {
+        const migration = accountRepository.migrateLegacy();
+        if (migration.migrated) {
+            log.info(
+                `Migrated ${migration.accounts} Jagex account(s) into ${migration.sessions} protected session(s).`
+            );
+        }
+    }
+    if (typeof oauthJagex.configureAccountRepository === 'function') {
+        oauthJagex.configureAccountRepository(accountRepository);
+    }
+    const accountDeps = {
+        ...deps,
+        accountRepository,
+        productConfig,
+        productSessionService,
+        brokerSecretStore: secretStore
+    };
 
     function invalidVersionResult(version) {
         const message = `Invalid client version: ${JSON.stringify(String(version))}`;
         log.error(message);
         return { error: message };
+    }
+
+    function signedClientEntry(release, filePath) {
+        return {
+            version: release.client.version,
+            fileName: path.basename(filePath),
+            channel: release.channel,
+            sequence: release.sequence,
+            size: release.client.size,
+            sha256: release.client.sha256,
+            artifactPath: release.client.artifactPath,
+            signedEnvelope: releaseManifestService.getLocallyAcceptedEnvelope()
+        };
+    }
+
+    function assertRegisteredReleaseIsSigned(entry) {
+        if (!entry?.signedEnvelope) {
+            throw new Error(`client ${entry?.version || 'release'} has no signed local metadata`);
+        }
+        const release = releaseManifestService.verifyEnvelope(entry.signedEnvelope);
+        const client = release.client;
+        if (
+            release.channel !== entry.channel ||
+            release.sequence !== entry.sequence ||
+            client.version !== entry.version ||
+            client.size !== entry.size ||
+            client.sha256 !== entry.sha256 ||
+            client.artifactPath !== entry.artifactPath
+        ) {
+            throw new Error(`client ${entry.version} registry metadata does not match its signed manifest`);
+        }
+    }
+
+    async function verifyClientBeforeLaunch(version) {
+        if (!releaseUpdateSettings.enabled) return { legacy: true };
+        const filePath = path.join(microbotDir, `microbot-${version}.jar`);
+        const registered = verifiedClientReleaseStore.get(version);
+        if (registered) {
+            assertRegisteredReleaseIsSigned(registered);
+            await verifiedClientReleaseStore.verifyFile(registered, filePath);
+            log.info(`Verified local client release ${version} before launch.`);
+            return { verified: true, release: registered };
+        }
+
+        let release = releaseManifestService.getLocallyAccepted();
+        if (!release || release.client.version !== version) {
+            try {
+                release = await releaseManifestService.fetchCurrent();
+            } catch (error) {
+                log.warn?.(`Unable to identify ${version} as a signed release: ${error.message}`);
+                release = null;
+            }
+        }
+        if (release?.client?.version === version) {
+            const entry = signedClientEntry(release, filePath);
+            await verifiedClientReleaseStore.verifyFile(entry, filePath);
+            verifiedClientReleaseStore.record(entry);
+            log.info(`Enrolled and verified local client release ${version} before launch.`);
+            return { verified: true, release: entry };
+        }
+
+        log.warn?.(`Launching unregistered legacy/custom client ${version}.`);
+        return { legacy: true };
     }
 
     ipcMain.handle('start-auth-flow', async (event) => {
@@ -62,18 +362,12 @@ module.exports = async function (deps) {
         'properties.js'
     ));
     await propertiesHandler(deps);
-    const overwriteCredentialsHandler = require(path.join(
-        projectDir,
-        'libs',
-        'overwrite-credential-properties.js'
-    ));
-    await overwriteCredentialsHandler(deps);
     const accountLoaderHandler = require(path.join(
         projectDir,
         'libs',
         'accounts-loader.js'
     ));
-    await accountLoaderHandler(deps);
+    await accountLoaderHandler(accountDeps);
     const jarExecutorHandler = require(path.join(
         projectDir,
         'libs',
@@ -87,10 +381,18 @@ module.exports = async function (deps) {
                     target.handle(
                         channel,
                         versionCheckedChannels.has(channel)
-                            ? (event, version, ...rest) =>
-                                  isSafeClientVersion(version)
-                                      ? handler(event, version, ...rest)
-                                      : invalidVersionResult(version)
+                            ? async (event, version, ...rest) => {
+                                  if (!isSafeClientVersion(version)) {
+                                      return invalidVersionResult(version);
+                                  }
+                                  try {
+                                      await verifyClientBeforeLaunch(version);
+                                  } catch (error) {
+                                      log.error(`Client launch integrity check failed: ${error.message}`);
+                                      return { error: error.message };
+                                  }
+                                  return handler(event, version, ...rest);
+                              }
                             : handler
                     );
             }
@@ -98,7 +400,11 @@ module.exports = async function (deps) {
             return typeof value === 'function' ? value.bind(target) : value;
         }
     });
-    await jarExecutorHandler({ ...deps, ipcMain: versionCheckedIpcMain });
+    await jarExecutorHandler({
+        ...accountDeps,
+        ipcMain: versionCheckedIpcMain,
+        clientReleaseHealth
+    });
     const packageVersion = packageJson.version;
 
     ipcMain.handle('refresh-accounts', async () => {
@@ -109,33 +415,20 @@ module.exports = async function (deps) {
                 'oauth-jagex.js'
             ));
 
-            const accountsPath = path.join(microbotDir, 'accounts.json');
-            if (!fs.existsSync(accountsPath)) {
+            if (!accountRepository.exists()) {
                 return { error: 'accounts.json does not exist' };
             }
 
-            let accountsData = [];
+            let sessionIds = [];
             try {
-                const raw = fs.readFileSync(accountsPath, 'utf8');
-                accountsData = JSON.parse(raw);
+                sessionIds = accountRepository.listSessionIds();
             } catch (err) {
                 log.error('Failed to read accounts.json for refresh:', err.message);
                 return { error: 'Failed to read accounts.json' };
             }
 
-            if (!Array.isArray(accountsData) || accountsData.length === 0) {
-                return { error: 'No accounts found to refresh' };
-            }
-
-            const sessionIds = [
-                ...new Set(
-                    accountsData
-                        .map((account) => account && account.sessionId)
-                        .filter(Boolean)
-                )
-            ];
             if (sessionIds.length === 0) {
-                return { error: 'No sessionId found in accounts.json' };
+                return { error: 'No Jagex sessions found in accounts.json' };
             }
 
             let failedSessions = 0;
@@ -153,10 +446,8 @@ module.exports = async function (deps) {
                 return { error: warning, failedSessions };
             }
 
-            // Re-read accounts after refresh
             try {
-                const updatedRaw = fs.readFileSync(accountsPath, 'utf8');
-                const updatedAccounts = JSON.parse(updatedRaw);
+                const updatedAccounts = accountRepository.listPublicAccounts();
                 return { success: true, accounts: updatedAccounts, failedSessions, warning };
             } catch (err) {
                 log.error('Failed to read updated accounts.json after refresh:', err.message);
@@ -172,23 +463,75 @@ module.exports = async function (deps) {
         if (!isSafeClientVersion(version)) {
             return invalidVersionResult(version);
         }
-        const url = `${filestorage}/releases/microbot/stable/microbot-${version}.jar`;
         try {
+            const filePath = path.join(microbotDir, `microbot-${version}.jar`);
+            if (releaseUpdateSettings.enabled) {
+                const release = await releaseManifestService.fetchCurrent();
+                if (release.client.version !== version) {
+                    return {
+                        error: `Client version ${version} is not the current signed ${releaseUpdateSettings.channel} release`
+                    };
+                }
+                event.sender.send('progress', {
+                    percent: 10,
+                    status: `Downloading verified client ${version}...`
+                });
+                const result = await downloadVerifiedArtifact({
+                    httpClient: axios,
+                    url: releaseManifestService.resolveArtifactUrl(
+                        release.client.artifactPath
+                    ),
+                    destination: filePath,
+                    expectedSize: release.client.size,
+                    expectedSha256: release.client.sha256,
+                    onProgress: ({ bytes, total }) => {
+                        const transferPercent = (bytes * 100) / total;
+                        event.sender.send('progress', {
+                            percent: (10 + transferPercent * 0.8).toFixed(2),
+                            status: `Downloading verified client ${version}... (${transferPercent.toFixed(2)}%)`
+                        });
+                    }
+                });
+                if (!result.reused) {
+                    try {
+                        markClientDownloaded(fs, microbotDir, version);
+                    } catch (markError) {
+                        log.error(
+                            `Failed to record downloaded client ${version}: ${markError.message}`
+                        );
+                    }
+                }
+                verifiedClientReleaseStore.record(
+                    signedClientEntry(release, filePath)
+                );
+                event.sender.send('progress', {
+                    percent: 100,
+                    status: 'Verified download completed!'
+                });
+                return { success: true, path: filePath, verified: true };
+            }
+            if (
+                fs.existsSync(filePath)
+            ) {
+                return {
+                    success: true,
+                    path: filePath
+                };
+            }
+            if (!filestorage) {
+                return {
+                    error:
+                        'Client downloads are disabled until a product update endpoint is configured'
+                };
+            }
             event.sender.send('progress', {
                 percent: 90,
                 status: 'Downloading Microbot-' + version + ''
             });
-            if (
-                fs.existsSync(path.join(microbotDir, `microbot-${version}.jar`))
-            ) {
-                return {
-                    success: true,
-                    path: path.join(microbotDir, `microbot-${version}.jar`)
-                };
-            }
+            const downloadUrl = `${filestorage}/releases/microbot/stable/microbot-${version}.jar`;
             const response = await axios({
                 method: 'get',
-                url: url,
+                url: downloadUrl,
                 responseType: 'arraybuffer',
                 onDownloadProgress: (progressEvent) => {
                     if (progressEvent.total) {
@@ -215,7 +558,6 @@ module.exports = async function (deps) {
                     }
                 }
             });
-            const filePath = path.join(microbotDir, `microbot-${version}.jar`);
             fs.writeFileSync(filePath, response.data);
             try {
                 markClientDownloaded(fs, microbotDir, version);
@@ -229,7 +571,7 @@ module.exports = async function (deps) {
             return { success: true, path: filePath };
         } catch (error) {
             log.error(
-                `Error downloading client ${version} from ${url}:`,
+                `Error downloading client ${version}:`,
                 error
             );
             return { error: error.message };
@@ -237,6 +579,18 @@ module.exports = async function (deps) {
     });
 
     ipcMain.handle('fetch-launcher-version', async () => {
+        if (releaseUpdateSettings.enabled) {
+            try {
+                const launcher = (await releaseManifestService.fetchCurrent()).launcher;
+                return launcher ? launcher.version : packageJson.version;
+            } catch (error) {
+                log.error(`Error fetching signed launcher version: ${error.message}`);
+                return { error: error.message };
+            }
+        }
+        if (!url) {
+            return packageJson.version;
+        }
         try {
             const response = await axios.get(url + '/api/version/launcher');
             return response.data;
@@ -247,6 +601,17 @@ module.exports = async function (deps) {
     });
 
     ipcMain.handle('fetch-client-version', async () => {
+        if (releaseUpdateSettings.enabled) {
+            try {
+                return (await releaseManifestService.fetchCurrent()).client.version;
+            } catch (error) {
+                log.error(`Error fetching signed client version: ${error.message}`);
+                return { error: error.message };
+            }
+        }
+        if (!url) {
+            return productConfig.clientVersion;
+        }
         try {
             const response = await axios.get(url + '/api/version/client');
             return response.data;
@@ -264,10 +629,26 @@ module.exports = async function (deps) {
         try {
             const filePath = path.join(microbotDir, `microbot-${version}.jar`);
             log.info(filePath);
-            return fs.existsSync(filePath);
+            if (!fs.existsSync(filePath)) return false;
+            if (!releaseUpdateSettings.enabled) return true;
+
+            const registered = verifiedClientReleaseStore.get(version);
+            if (registered) {
+                assertRegisteredReleaseIsSigned(registered);
+                await verifiedClientReleaseStore.verifyFile(registered, filePath);
+                return true;
+            }
+            const release =
+                releaseManifestService.getLocallyAccepted() ||
+                (await releaseManifestService.fetchCurrent());
+            if (release.client.version !== version) return true;
+            const entry = signedClientEntry(release, filePath);
+            await verifiedClientReleaseStore.verifyFile(entry, filePath);
+            verifiedClientReleaseStore.record(entry);
+            return true;
         } catch (error) {
             log.error(`Error checking if client exists: ${error}`);
-            return { error: error.message };
+            return false;
         }
     });
 

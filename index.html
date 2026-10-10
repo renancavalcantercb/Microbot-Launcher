@@ -4,17 +4,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Microbot Launcher - Download, update, and manage your Microbot client easily.">
-    <meta name="keywords" content="Microbot, Launcher, Download, Update, Jagex, Account, Game, Proxy">
-    <title>Microbot Launcher</title>
+    <meta name="description" content="Microbot Cut Launcher - Manage and start the Microbot Cut client.">
+    <meta name="keywords" content="Microbot Cut, Launcher, Jagex, Account, Game, Proxy">
+    <title>Microbot Cut Launcher</title>
     <link rel="stylesheet" href="css/styles.css">
 </head>
 
 <body>
+    <div id="product-auth-modal" class="auth-modal auth-hidden" role="dialog" aria-modal="true"
+        aria-labelledby="product-auth-title">
+        <div class="auth-card">
+            <h1 id="product-auth-title" class="auth-title">Connect Microbot Cut</h1>
+            <p class="auth-subtitle">Sign in with Discord on the website, generate a code, and paste it below.</p>
+            <form id="product-auth-form" class="auth-form" novalidate>
+                <label for="product-activation-code">Activation code</label>
+                <input id="product-activation-code" name="activation-code" type="text"
+                    autocomplete="one-time-code" spellcheck="false" placeholder="mbc_act_XXXX-XXXX-XXXX-XXXX" required />
+                <button id="product-auth-submit" type="submit" class="auth-submit">Connect launcher</button>
+            </form>
+            <p id="product-auth-error" class="auth-error" role="alert" aria-live="polite"></p>
+            <button id="product-auth-site" class="auth-cancel" type="button">Open account page</button>
+        </div>
+    </div>
     <div id="auth-modal" class="auth-modal auth-hidden" role="dialog" aria-modal="true">
         <div class="auth-card">
-            <h1 class="auth-title">Microbot Launcher</h1>
-            <p class="auth-subtitle">Sign in to continue</p>
+            <h1 class="auth-title" data-launcher-name>Microbot Cut Launcher</h1>
+            <p class="auth-subtitle" data-product-credit>Based on Microbot</p>
             <div class="auth-tabs" role="tablist">
                 <button id="auth-tab-signin" class="auth-tab active" data-target="signin" role="tab"
                     aria-selected="true">
@@ -74,7 +89,7 @@
         <div id="update-available">
             <h2>New Update Available!</h2>
             <p>
-                A new version of <strong>Microbot</strong> is available. It
+                A new version of <strong data-product-name>Microbot Cut</strong> is available. It
                 includes exciting new features and improvements.
             </p>
             <div class="modal-actions">
@@ -98,9 +113,10 @@
                     <line x1="3" y1="18" x2="21" y2="18"></line>
                 </svg>
             </button>
-            <span class="titlebar-title">Microbot Launcher - 0.0.0.0</span>
+            <span class="titlebar-title">Microbot Cut Launcher - 0.0.0.0</span>
             <div id="user-session" class="user-session" aria-live="polite">
                 <span id="session-email" class="session-email"></span>
+                <button id="product-signout-btn" class="session-action hidden" type="button">Sign out</button>
                 <button id="change-password-btn" class="session-action" type="button">Change Password</button>
                 <button id="signout-btn" class="session-action" type="button">Sign Out</button>
             </div>
@@ -146,14 +162,19 @@
                     <!-- Using webview instead of iframe for greater control over injected CSS/JS -->
                     <webview id="website" src="" allowpopups="" disablewebsecurity=""></webview>
                     <div id="embed-overlay"></div>
+                    <div id="product-home" class="product-home">
+                        <img src="images/microbot_cut.png" alt="Microbot Cut" width="180" height="180">
+                        <h2 data-launcher-name>Microbot Cut Launcher</h2>
+                        <p>Your accounts and client builds are managed locally.</p>
+                        <small data-product-credit>Based on Microbot</small>
+                    </div>
                 </div>
             </div>
             <!-- Sidebar -->
             <aside class="sidebar">
-                <div class="game-logo">
-                    <img alt="Microbot Logo"
-                        src="https://files.microbot.cloud/assets/microbot-launcher/images/microbot_transparent.png"
-                        width="100" height="100">
+                <div class="game-logo" aria-label="Microbot Cut">
+                    <img src="images/microbot_cut.png" alt="Microbot Cut logo" width="128" height="128">
+                    <small data-product-credit>Based on Microbot</small>
                 </div>
                 <div class="play-buttons">
                     <button id="play-no-jagex-account" class="play-button loadingButton">
@@ -172,6 +193,17 @@
                 <div class="game-info">
                     <label for="client">Version</label>
                     <select id="client"></select>
+                    <section id="client-release-status" class="client-release-status hidden" aria-live="polite">
+                        <div class="client-release-heading">
+                            <span>Release health</span>
+                            <span id="client-release-badge" class="client-release-badge">Unknown</span>
+                        </div>
+                        <div id="client-release-version" class="client-release-version"></div>
+                        <div id="client-release-detail" class="client-release-detail"></div>
+                        <button id="client-release-rollback" class="client-release-rollback hidden" type="button">
+                            Use last-known-good release
+                        </button>
+                    </section>
                     <label for="character">Jagex Account</label>
                     <div class="accounts-refresh-row">
                         <div id="accounts-dropdown-container" class="accounts-dropdown-container" aria-live="polite">
@@ -211,11 +243,14 @@
                 <li class="menu-item has-sub" data-action="open-folder-root">
                     <span class="menu-label">Open ▸</span>
                     <ul class="submenu">
-                        <li class="submenu-item" data-location="microbot-folder">Microbot Folder</li>
+                        <li class="submenu-item" data-location="microbot-folder">Client Data Folder</li>
                         <li class="submenu-item" data-location="runelite-folder">Runelite Folder</li>
                         <li class="submenu-item" data-location="launcher-logs">Launcher Logs</li>
                         <li class="submenu-item" data-location="client-logs">Client Logs</li>
                     </ul>
+                </li>
+                <li id="import-legacy-data" class="menu-item" data-action="import-legacy-data">
+                    Import Existing Microbot Data
                 </li>
             </ul>
         </div>

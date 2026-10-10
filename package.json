@@ -1,16 +1,22 @@
 {
   "name": "microbot-launcher",
   "version": "3.2.10",
-  "description": "Launcher for the microbot client",
+  "description": "Launcher for the Microbot Cut client",
   "main": "main.js",
   "scripts": {
     "dev": "cross-env DEBUG=true electron .",
+    "dev:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1",
+    "dev:plugin-staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1",
     "dev:mock": "cross-env DEBUG=true MOCK_AUTH=1 MOCK_USERS='demo@microbot.com:DemoPassword123,test@example.com:TestPassword123' electron .",
     "start": "electron-forge start",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "release": "electron-builder --publish always",
+    "product:sync": "node scripts/sync-product-config.js",
+    "release": "npm run product:sync && electron-builder --publish never",
+    "release:key:generate": "node scripts/generate-release-signing-key.js",
+    "release:manifest:sign": "node scripts/sign-release-manifest.js",
+    "release:client": "node scripts/publish-client-release.js",
     "linux": "electron-builder --linux",
     "mac": "electron-builder --mac"
   },
@@ -43,8 +49,8 @@
   },
   "build": {
     "asar": "true",
-    "appId": "com.microbot.launcher",
-    "productName": "Microbot Launcher",
+    "appId": "com.microbotcut.launcher",
+    "productName": "Microbot Cut Launcher",
     "files": [
       "main.js",
       "renderer.js",
@@ -55,22 +61,23 @@
       "libs/**",
       "index.html",
       "css/**",
-      "build/READ THIS BEFORE INSTALL.html"
+      "build/READ THIS BEFORE INSTALL.html",
+      "product-config.js"
     ],
     "directories": {
       "buildResources": "build"
     },
     "win": {
       "target": "nsis",
-      "icon": "images/microbot_transparent.ico"
+      "icon": "images/microbot_cut.png"
     },
     "mac": {
       "category": "public.app-category.utilities",
       "target": "default",
-      "icon": "images/microbot_transparent.icns"
+      "icon": "images/microbot_cut.png"
     },
     "dmg": {
-      "icon": "images/microbot_transparent.icns",
+      "icon": "images/microbot_cut.png",
       "background": "images/dmg-background.png",
       "title": "${productName} Installer",
       "iconSize": 108,
@@ -99,7 +106,7 @@
         "AppImage",
         "snap"
       ],
-      "icon": "images/microbot_transparent.png",
+      "icon": "images/microbot_cut.png",
       "category": "Game"
     },
     "nsis": {
@@ -107,11 +114,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Microbot Launcher"
-    },
-    "publish": {
-      "provider": "generic",
-      "url": "https://files.microbot.cloud/releases/microbot-launcher/"
+      "shortcutName": "Microbot Cut Launcher"
     }
   },
   "optionalDependencies": {

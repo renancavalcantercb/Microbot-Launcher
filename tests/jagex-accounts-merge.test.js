@@ -8,111 +8,14 @@ const fixturePath = path.join(
     'jagex-accounts-unnamed.json'
 );
 
-function loadFixture() {
-    return JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-}
-
-describe('mergeAccounts', () => {
-    let mergeAccounts;
-
-    beforeAll(() => {
-        jest.isolateModules(() => {
-            jest.doMock('patchright', () => ({ chromium: {} }));
-            jest.doMock('axios', () => ({ get: jest.fn(), post: jest.fn() }));
-            jest.doMock('electron-log', () => ({
-                info: jest.fn(),
-                error: jest.fn()
-            }));
-            ({ mergeAccounts } = require('../libs/oauth-jagex.js'));
-        });
-    });
-
-    test('fills display names of every existing unnamed character', () => {
-        const fetched = [
-            { accountId: 'fake-char-1', displayName: 'FakeOne', userHash: 'fake-hash-a' },
-            { accountId: 'fake-char-2', displayName: 'FakeTwo', userHash: 'fake-hash-a' }
-        ];
-        const { accounts, added, updated } = mergeAccounts(
-            loadFixture(),
-            fetched,
-            'fake-session-new',
-            '2026-10-01T00:00:00.000Z'
-        );
-
-        expect(added).toBe(0);
-        expect(updated).toBe(2);
-        expect(accounts.map((a) => a.displayName)).toEqual([
-            'FakeOne',
-            'FakeTwo',
-            'FakeNamed'
-        ]);
-        expect(accounts[0]).toMatchObject({
-            sessionId: 'fake-session-new',
-            createdOn: '2026-09-01T10:00:00.000Z',
-            profile: 'fake-profile-1'
-        });
-        expect(accounts[2].sessionId).toBe('fake-session-other');
-    });
-
-    test('replaces a stored name when the character was renamed', () => {
-        const { accounts, updated } = mergeAccounts(
-            [{ accountId: 'fake-char-9', displayName: 'Old', sessionId: 'fake-session-old' }],
-            [{ accountId: 'fake-char-9', displayName: 'New' }],
-            'fake-session-old',
-            '2026-10-01T00:00:00.000Z'
-        );
-
-        expect(updated).toBe(1);
-        expect(accounts[0].displayName).toBe('New');
-    });
-
-    test('keeps a known display name when the response has none', () => {
-        const { accounts, updated } = mergeAccounts(
-            loadFixture(),
-            [{ accountId: 'fake-char-3', displayName: null, userHash: 'fake-hash-b' }],
-            'fake-session-other',
-            '2026-10-01T00:00:00.000Z'
-        );
-
-        expect(updated).toBe(0);
-        expect(accounts[2].displayName).toBe('FakeNamed');
-    });
-
-    test('appends new characters and reports no change when nothing differs', () => {
-        const existing = loadFixture();
-        const first = mergeAccounts(
-            existing,
-            [{ accountId: 'fake-char-4', displayName: 'FakeFour', userHash: 'fake-hash-b' }],
-            'fake-session-other',
-            '2026-10-01T00:00:00.000Z'
-        );
-        expect(first.added).toBe(1);
-        expect(first.accounts[3]).toEqual({
-            accountId: 'fake-char-4',
-            displayName: 'FakeFour',
-            userHash: 'fake-hash-b',
-            sessionId: 'fake-session-other',
-            createdOn: '2026-10-01T00:00:00.000Z'
-        });
-
-        const second = mergeAccounts(
-            first.accounts,
-            [{ accountId: 'fake-char-4', displayName: 'FakeFour', userHash: 'fake-hash-b' }],
-            'fake-session-other',
-            '2026-10-02T00:00:00.000Z'
-        );
-        expect(second.added).toBe(0);
-        expect(second.updated).toBe(0);
-        expect(existing).toEqual(loadFixture());
-    });
-});
-
 describe('writeAccountsToFile', () => {
     let tempHome;
     let originalHome;
     let originalUserProfile;
     let writeAccountsToFile;
+    let configureAccountRepository;
     let axiosGet;
+    let accountRepository;
 
     beforeEach(() => {
         tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mbtest-home-'));
@@ -133,8 +36,13 @@ describe('writeAccountsToFile', () => {
                 info: jest.fn(),
                 error: jest.fn()
             }));
-            ({ writeAccountsToFile } = require('../libs/oauth-jagex.js'));
+            ({
+                writeAccountsToFile,
+                configureAccountRepository
+            } = require('../libs/oauth-jagex.js'));
         });
+        accountRepository = { storeFetchedAccounts: jest.fn() };
+        configureAccountRepository(accountRepository);
     });
 
     afterEach(() => {
@@ -155,6 +63,11 @@ describe('writeAccountsToFile', () => {
             ]
         });
 
+        accountRepository.storeFetchedAccounts.mockReturnValue({
+            added: 0,
+            updated: 2
+        });
+
         const status = await writeAccountsToFile('fake-session-new');
 
         expect(status).toEqual({ ok: true, added: 0, updated: 2 });
@@ -163,20 +76,14 @@ describe('writeAccountsToFile', () => {
             'https://auth.jagex.com/game-session/v1/accounts',
             { headers: { Authorization: 'Bearer fake-session-new' } }
         );
-        const stored = JSON.parse(
-            fs.readFileSync(
-                path.join(tempHome, '.microbot', 'accounts.json'),
-                'utf8'
-            )
+        expect(accountRepository.storeFetchedAccounts).toHaveBeenCalledWith(
+            expect.arrayContaining([
+                expect.objectContaining({ accountId: 'fake-char-1' }),
+                expect.objectContaining({ accountId: 'fake-char-2' })
+            ]),
+            'fake-session-new',
+            expect.any(String)
         );
-        expect(stored).toHaveLength(3);
-        expect(
-            stored.map((a) => [a.accountId, a.displayName, a.sessionId])
-        ).toEqual([
-            ['fake-char-1', 'FakeOne', 'fake-session-new'],
-            ['fake-char-2', 'FakeTwo', 'fake-session-new'],
-            ['fake-char-3', 'FakeNamed', 'fake-session-other']
-        ]);
     });
 
     test('reports a failed session and leaves the file untouched', async () => {
@@ -192,17 +99,21 @@ describe('writeAccountsToFile', () => {
         expect(fs.readFileSync(accountsFile, 'utf8')).toBe(before);
     });
 
-    test('does not overwrite an unreadable accounts file', async () => {
+    test('reports a repository failure without writing files directly', async () => {
         const accountsFile = path.join(tempHome, '.microbot', 'accounts.json');
         fs.writeFileSync(accountsFile, '{ not json');
+        const before = fs.readFileSync(accountsFile, 'utf8');
         axiosGet.mockResolvedValue({
             data: [{ accountId: 'fake-char-1', displayName: 'FakeOne' }]
+        });
+        accountRepository.storeFetchedAccounts.mockImplementation(() => {
+            throw new Error('Unsupported or corrupted accounts file');
         });
 
         const status = await writeAccountsToFile('fake-session-new');
 
         expect(status.ok).toBe(false);
-        expect(fs.readFileSync(accountsFile, 'utf8')).toBe('{ not json');
+        expect(fs.readFileSync(accountsFile, 'utf8')).toBe(before);
         expect(
             fs.readdirSync(path.join(tempHome, '.microbot')).filter((f) =>
                 f.endsWith('.tmp')

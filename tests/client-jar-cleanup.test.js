@@ -1,6 +1,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const { Readable } = require('stream');
 
 jest.mock('../libs/oauth-jagex.js', () => ({
     startAuthFlow: jest.fn(),
@@ -152,7 +154,12 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 dialog: {},
                 fs,
                 projectDir: path.join(__dirname, '..'),
-                app: {}
+                app: {},
+                productConfig: {
+                    ...require('../product-config'),
+                    updateApiBase: 'https://microbot.test',
+                    updateFilesBase: 'https://files.microbot.test'
+                }
             });
         });
 
@@ -213,6 +220,189 @@ describe('client jar cleanup and listing with an isolated home', () => {
             expect(result.success).toBe(true);
             expect(axios).not.toHaveBeenCalled();
             expect(exists('downloaded_clients.json')).toBe(false);
+        });
+
+        async function signedReleaseHandlers({ downloadedArtifact, signedArtifact }) {
+            const releaseHandlers = {};
+            const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+            const version = 'cut-2.6.31-p1';
+            const payload = {
+                schemaVersion: 1,
+                channel: 'staging',
+                sequence: 1,
+                publishedAt: '2026-10-10T00:00:00.000Z',
+                launcher: {
+                    version: '3.2.11',
+                    minimumSupportedVersion: '3.2.10',
+                    platforms: {
+                        'windows-x64': {
+                            artifactPath: 'releases/artifacts/launcher/setup.exe',
+                            updaterMetadataPath: 'releases/artifacts/launcher/latest.yml',
+                            size: 123,
+                            sha256: 'a'.repeat(64)
+                        }
+                    }
+                },
+                client: {
+                    version,
+                    minimumLauncherVersion: '3.2.10',
+                    artifactPath: `releases/artifacts/client/${version}/client.jar`,
+                    size: signedArtifact.length,
+                    sha256: crypto.createHash('sha256').update(signedArtifact).digest('hex')
+                }
+            };
+            const envelope = require('../libs/release-manifest-signing')
+                .signReleaseManifest(payload, {
+                    keyId: 'release-staging-test',
+                    privateKeyPem: keys.privateKey.export({
+                        type: 'pkcs8',
+                        format: 'pem'
+                    })
+                });
+            const releaseAxios = jest.fn().mockResolvedValue({
+                data: Readable.from([downloadedArtifact])
+            });
+            releaseAxios.get = jest.fn().mockResolvedValue({ data: envelope });
+            const ipcHandlers = require('../libs/ipc-handlers.js');
+            await ipcHandlers({
+                ipcMain: {
+                    handle: (channel, fn) => {
+                        releaseHandlers[channel] = fn;
+                    }
+                },
+                axios: releaseAxios,
+                microbotDir,
+                productDataDir: microbotDir,
+                packageJson: { version: '3.2.10' },
+                path,
+                log: { info: jest.fn(), error: jest.fn() },
+                dialog: {},
+                fs,
+                projectDir: path.join(__dirname, '..'),
+                app: {},
+                environment: {},
+                productConfig: {
+                    ...require('../product-config'),
+                    updateApiBase: null,
+                    updateFilesBase: null,
+                    releaseUpdates: {
+                        enabled: true,
+                        channel: 'staging',
+                        manifestUrl: 'https://cut.example/releases/staging/manifest.json',
+                        artifactBaseUrl: 'https://cut.example/',
+                        publicKey: keys.publicKey
+                            .export({ type: 'spki', format: 'der' })
+                            .toString('base64'),
+                        publicKeyId: 'release-staging-test'
+                    }
+                }
+            });
+            return { releaseHandlers, releaseAxios, payload, version };
+        }
+
+        test('uses the signed release for version discovery and verified download', async () => {
+            const artifact = Buffer.from('signed-client-jar');
+            const { releaseHandlers, releaseAxios, version } =
+                await signedReleaseHandlers({
+                    downloadedArtifact: artifact,
+                    signedArtifact: artifact
+                });
+            const sender = { send: jest.fn() };
+
+            await expect(releaseHandlers['fetch-launcher-version']()).resolves.toBe('3.2.11');
+            await expect(releaseHandlers['fetch-client-version']()).resolves.toBe(version);
+            await expect(
+                releaseHandlers['download-client']({ sender }, version)
+            ).resolves.toMatchObject({ success: true, verified: true });
+
+            expect(fs.readFileSync(path.join(microbotDir, `microbot-${version}.jar`)))
+                .toEqual(artifact);
+            expect(readDownloaded()).toEqual([version]);
+            expect(releaseAxios.get).toHaveBeenCalledTimes(3);
+            expect(releaseAxios).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    url: `https://cut.example/releases/artifacts/client/${version}/client.jar`,
+                    responseType: 'stream'
+                })
+            );
+        });
+
+        test('rejects corrupt bytes from the signed client download', async () => {
+            const { releaseHandlers, version } = await signedReleaseHandlers({
+                downloadedArtifact: Buffer.from('mismatch-client-jar'),
+                signedArtifact: Buffer.from('expected-client-jar')
+            });
+
+            const result = await releaseHandlers['download-client'](
+                { sender: { send: jest.fn() } },
+                version
+            );
+
+            expect(result.error).toMatch(/SHA-256/);
+            expect(exists(`microbot-${version}.jar`)).toBe(false);
+            expect(fs.readdirSync(microbotDir).some((name) => name.endsWith('.part')))
+                .toBe(false);
+        });
+
+        test('blocks a signed client that is modified after installation', async () => {
+            const artifact = Buffer.from('signed-client-jar');
+            const { releaseHandlers, version } = await signedReleaseHandlers({
+                downloadedArtifact: artifact,
+                signedArtifact: artifact
+            });
+            await releaseHandlers['download-client'](
+                { sender: { send: jest.fn() } },
+                version
+            );
+            fs.writeFileSync(
+                path.join(microbotDir, `microbot-${version}.jar`),
+                Buffer.from('tampered-client-jar')
+            );
+
+            await expect(releaseHandlers['client-exists']({}, version)).resolves.toBe(false);
+            await expect(
+                releaseHandlers['open-client']({}, version, {}, null, '1g')
+            ).resolves.toEqual({
+                error: `client ${version} failed local integrity verification; reinstall this release`
+            });
+        });
+
+        test('uses local versions and disables downloads without product endpoints', async () => {
+            const offlineHandlers = {};
+            const offlineAxios = jest.fn();
+            offlineAxios.get = jest.fn();
+            const ipcHandlers = require('../libs/ipc-handlers.js');
+            await ipcHandlers({
+                ipcMain: {
+                    handle: (channel, fn) => {
+                        offlineHandlers[channel] = fn;
+                    }
+                },
+                axios: offlineAxios,
+                microbotDir,
+                packageJson: { version: '1.0.0' },
+                path,
+                log: { info: jest.fn(), error: jest.fn() },
+                dialog: {},
+                fs,
+                projectDir: path.join(__dirname, '..'),
+                app: {},
+                productConfig: require('../product-config')
+            });
+
+            expect(await offlineHandlers['fetch-launcher-version']()).toBe('1.0.0');
+            expect(await offlineHandlers['fetch-client-version']()).toBe('2.6.30');
+            expect(
+                await offlineHandlers['download-client'](
+                    { sender: { send: jest.fn() } },
+                    '2.6.29'
+                )
+            ).toEqual({
+                error:
+                    'Client downloads are disabled until a product update endpoint is configured'
+            });
+            expect(offlineAxios).not.toHaveBeenCalled();
+            expect(offlineAxios.get).not.toHaveBeenCalled();
         });
     });
 });

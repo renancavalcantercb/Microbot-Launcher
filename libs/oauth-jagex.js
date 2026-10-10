@@ -1,15 +1,18 @@
 const { chromium } = require('patchright');
 const crypto = require('crypto');
 const axios = require('axios');
-const fs = require('fs').promises;
-const path = require('path');
 const http = require('http');
 const log = require('electron-log');
 const { getAvailableBrowser } = require('./browser-util.js');
 
-const userHome = process.env.HOME || process.env.USERPROFILE;
-const ACCOUNTS_DIR = path.join(userHome, '.microbot');
-const ACCOUNTS_FILE_PATH = path.join(ACCOUNTS_DIR, 'accounts.json');
+let accountRepository = null;
+
+function configureAccountRepository(repository) {
+    if (!repository || typeof repository.storeFetchedAccounts !== 'function') {
+        throw new Error('A secure AccountRepository is required');
+    }
+    accountRepository = repository;
+}
 
 const state = generateRandomState(8);
 const codeVerifier = generateCodeVerifier(45);
@@ -226,46 +229,6 @@ async function getSessionId(idToken) {
     }
 }
 
-function hasDisplayName(account) {
-    return (
-        typeof account?.displayName === 'string' &&
-        account.displayName.trim().length > 0
-    );
-}
-
-function mergeAccounts(existingAccounts, fetchedAccounts, sessionId, now) {
-    const accounts = existingAccounts.map((acc) => ({ ...acc }));
-    const indexById = new Map(
-        accounts.map((acc, index) => [acc.accountId, index])
-    );
-    let added = 0;
-    let updated = 0;
-
-    for (const fetched of Array.isArray(fetchedAccounts) ? fetchedAccounts : []) {
-        if (!fetched || !fetched.accountId) {
-            continue;
-        }
-        const index = indexById.get(fetched.accountId);
-        if (index === undefined) {
-            indexById.set(fetched.accountId, accounts.length);
-            accounts.push({ ...fetched, sessionId, createdOn: now });
-            added++;
-            continue;
-        }
-        const current = accounts[index];
-        const next = { ...current, ...fetched, sessionId };
-        if (!hasDisplayName(fetched)) {
-            next.displayName = current.displayName;
-        }
-        if (JSON.stringify(next) !== JSON.stringify(current)) {
-            accounts[index] = next;
-            updated++;
-        }
-    }
-
-    return { accounts, added, updated };
-}
-
 /**
  * Fetches account details and writes them to a JSON file.
  * @param {string} sessionId The game session ID.
@@ -273,6 +236,9 @@ function mergeAccounts(existingAccounts, fetchedAccounts, sessionId, now) {
 async function writeAccountsToFile(sessionId) {
     log.info('Fetching account information...');
     try {
+        if (!accountRepository) {
+            throw new Error('Secure account storage is unavailable');
+        }
         const response = await axios.get(
             'https://auth.jagex.com/game-session/v1/accounts',
             {
@@ -280,41 +246,15 @@ async function writeAccountsToFile(sessionId) {
             }
         );
 
-        await fs.mkdir(ACCOUNTS_DIR, { recursive: true });
-
-        let existingAccounts = [];
-        try {
-            const fileContent = await fs.readFile(ACCOUNTS_FILE_PATH, 'utf-8');
-            existingAccounts = JSON.parse(fileContent);
-        } catch (e) {
-            if (e.code !== 'ENOENT') {
-                log.error(`Error reading existing accounts file: ${e.message}`);
-                return { ok: false, error: 'Accounts file is unreadable' };
-            }
-        }
-        if (!Array.isArray(existingAccounts)) {
-            log.error('Existing accounts file is not a list, not overwriting it');
-            return { ok: false, error: 'Accounts file is unreadable' };
-        }
-
-        const { accounts, added, updated } = mergeAccounts(
-            existingAccounts,
+        const { added, updated } = accountRepository.storeFetchedAccounts(
             response.data,
             sessionId,
             new Date().toISOString()
         );
 
         if (added > 0 || updated > 0) {
-            const tempPath = `${ACCOUNTS_FILE_PATH}.${process.pid}.tmp`;
-            try {
-                await fs.writeFile(tempPath, JSON.stringify(accounts, null, 2));
-                await fs.rename(tempPath, ACCOUNTS_FILE_PATH);
-            } catch (writeError) {
-                await fs.unlink(tempPath).catch(() => {});
-                throw writeError;
-            }
             log.info(
-                `Accounts file updated: ${added} new, ${updated} updated account(s) in ${ACCOUNTS_FILE_PATH}`
+                `Secure account storage updated: ${added} new, ${updated} updated account(s)`
             );
         } else {
             log.info('No account changes.');
@@ -606,4 +546,9 @@ async function startAuthFlow() {
     }
 }
 
-module.exports = { startAuthFlow, cancelAuthFlow, writeAccountsToFile, mergeAccounts };
+module.exports = {
+    startAuthFlow,
+    cancelAuthFlow,
+    writeAccountsToFile,
+    configureAccountRepository
+};

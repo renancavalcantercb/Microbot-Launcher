@@ -2,21 +2,40 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
+const crypto = require('crypto');
+
+function userHome() {
+    try {
+        return os.userInfo().homedir;
+    } catch (_) {
+        return os.homedir();
+    }
+}
 
 const JDKS = {
     8: process.env.M07_JAVA8_HOME,
-    11: process.env.M07_JAVA11_HOME || path.join(os.userInfo().homedir, '.jdks', 'temurin-11.0.28'),
+    11: process.env.M07_JAVA11_HOME || path.join(userHome(), '.jdks', 'temurin-11.0.28'),
     17: process.env.M07_JAVA17_HOME || '/usr/lib/jvm/java-17-openjdk-amd64'
 };
 const hasJdk = (major) => Boolean(JDKS[major]) && fs.existsSync(path.join(JDKS[major], 'bin', 'java'));
 const withJdk = (major) => (hasJdk(major) ? test : test.skip);
 const VERSION = '9.9.9';
-const HOMES = [...new Set([os.homedir(), os.userInfo().homedir])];
+const HOMES = [...new Set([os.homedir(), userHome()])];
 
 let workDir;
 let microbotDir;
 let originalPath;
 let originalMode;
+let originalPluginDevelopmentMode;
+let originalPluginRepositoryEnvironment;
+const PLUGIN_REPOSITORY_ENVIRONMENT_VARIABLES = [
+    'MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED',
+    'MICROBOT_CUT_PLUGIN_MANIFEST_URL',
+    'MICROBOT_CUT_PLUGIN_RELEASES_URL',
+    'MICROBOT_CUT_PLUGIN_RELEASES_API_URL',
+    'MICROBOT_CUT_PLUGIN_PUBLIC_KEY',
+    'MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID'
+];
 
 function buildTestJar() {
     const javac = path.join(JDKS[17], 'bin', 'javac');
@@ -33,7 +52,11 @@ function buildTestJar() {
     ]);
 }
 
-function createHarness({ clipboard = true, response = 0, startupWindowMs = 2500 } = {}) {
+function createHarness({
+    clipboard = true,
+    response = 0,
+    startupWindowMs = 2500
+} = {}) {
     const handlers = {};
     const spawnCalls = [];
     const dialogs = [];
@@ -42,6 +65,11 @@ function createHarness({ clipboard = true, response = 0, startupWindowMs = 2500 
         resolveDialog = resolve;
     });
     const log = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const launchAccount = {
+        accountId: 'test-account',
+        displayName: 'Test Account',
+        sessionId: 'abc123'
+    };
     const deps = {
         spawn: (command, args, options) => {
             spawnCalls.push({ command, args, options });
@@ -51,6 +79,36 @@ function createHarness({ clipboard = true, response = 0, startupWindowMs = 2500 
         fs,
         log,
         microbotDir,
+        accountRepository: {
+            getAccountForLaunch: jest.fn((accountId) =>
+                accountId === launchAccount.accountId
+                    ? { ...launchAccount }
+                    : null
+            )
+        },
+        productSessionService: {
+            createClientTicket: jest.fn().mockResolvedValue({
+                ticket: 'header.payload.signature',
+                apiBaseUrl: 'https://staging.example/api/v1',
+                keyId: 'staging-2026-01',
+                audience: 'microbot-cut-client'
+            })
+        },
+        clientTicketBroker: {
+            ensureStarted: jest.fn().mockResolvedValue(undefined),
+            createGrant: jest.fn().mockResolvedValue({
+                environment: {
+                    MICROBOT_CUT_AUTH_BROKER_URL: 'http://127.0.0.1:43123/v1/client-ticket',
+                    MICROBOT_CUT_AUTH_BROKER_CAPABILITY: 'test-child-capability',
+                    MICROBOT_CUT_AUTH_BROKER_DISCOVERY_FILE: path.join(
+                        microbotDir,
+                        'client-ticket-broker.json'
+                    )
+                },
+                secrets: ['test-child-capability'],
+                release: jest.fn()
+            })
+        },
         startupWindowMs,
         packageJson: { version: '3.2.8-test' },
         ipcMain: { handle: (name, fn) => { handlers[name] = fn; } },
@@ -65,13 +123,23 @@ function createHarness({ clipboard = true, response = 0, startupWindowMs = 2500 
             showErrorBox: jest.fn()
         }
     };
-    return { deps, handlers, spawnCalls, dialogs, dialogShown, log };
+    return {
+        deps,
+        handlers,
+        spawnCalls,
+        dialogs,
+        dialogShown,
+        log,
+        launchAccount
+    };
 }
 
 async function launch(harness, { ram = '', proxy = null, profile, displayName } = {}) {
     await require('../libs/jar-executor')(harness.deps);
-    const account = profile || displayName ? { profile, displayName } : null;
-    return harness.handlers['open-client']({}, VERSION, proxy, account, ram);
+    const accountId = profile || displayName ? harness.launchAccount.accountId : null;
+    if (profile) harness.launchAccount.profile = profile;
+    if (displayName) harness.launchAccount.displayName = displayName;
+    return harness.handlers['open-client']({}, VERSION, proxy, accountId, ram);
 }
 
 function useJava(major) {
@@ -96,6 +164,17 @@ afterAll(() => {
 beforeEach(() => {
     originalPath = process.env.PATH;
     originalMode = process.env.M07_MODE;
+    originalPluginDevelopmentMode = process.env.MICROBOT_CUT_PLUGIN_DEV;
+    originalPluginRepositoryEnvironment = Object.fromEntries(
+        PLUGIN_REPOSITORY_ENVIRONMENT_VARIABLES.map((name) => [
+            name,
+            process.env[name]
+        ])
+    );
+    delete process.env.MICROBOT_CUT_PLUGIN_DEV;
+    for (const name of PLUGIN_REPOSITORY_ENVIRONMENT_VARIABLES) {
+        delete process.env[name];
+    }
     delete process.env.DEBUG;
     jest.resetModules();
 });
@@ -104,9 +183,51 @@ afterEach(() => {
     process.env.PATH = originalPath;
     if (originalMode === undefined) delete process.env.M07_MODE;
     else process.env.M07_MODE = originalMode;
+    if (originalPluginDevelopmentMode === undefined)
+        delete process.env.MICROBOT_CUT_PLUGIN_DEV;
+    else process.env.MICROBOT_CUT_PLUGIN_DEV = originalPluginDevelopmentMode;
+    for (const [name, value] of Object.entries(
+        originalPluginRepositoryEnvironment
+    )) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+    }
 });
 
 describe('open-client launch diagnostics with real Java runtimes', () => {
+    test('resolves the selected account in the main process by account id', async () => {
+        const empty = path.join(workDir, 'account-id-empty-bin');
+        fs.mkdirSync(empty, { recursive: true });
+        process.env.PATH = empty;
+        const harness = createHarness();
+
+        expect(
+            await launch(harness, {
+                profile: 'MainAccount',
+                displayName: 'Fake Character'
+            })
+        ).toEqual({ success: true });
+
+        expect(
+            harness.deps.accountRepository.getAccountForLaunch
+        ).toHaveBeenCalledWith('test-account');
+    });
+
+    test('rejects account objects received over IPC', async () => {
+        const harness = createHarness();
+        await require('../libs/jar-executor')(harness.deps);
+
+        const result = await harness.handlers['open-client'](
+            {},
+            VERSION,
+            null,
+            { accountId: 'test-account', sessionId: 'must-not-cross-ipc' },
+            ''
+        );
+
+        expect(result).toEqual({ error: 'Selected account was not found' });
+    });
+
     test('missing Java shows the download dialog and preserves the Temurin link', async () => {
         const empty = path.join(workDir, 'empty-bin');
         fs.mkdirSync(empty, { recursive: true });
@@ -252,8 +373,8 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
     function fakeRuntimeHarness(probeOutput) {
         const { EventEmitter } = require('events');
         const harness = createHarness({ response: 1 });
-        harness.deps.spawn = (command, args) => {
-            harness.spawnCalls.push({ command, args });
+        harness.deps.spawn = (command, args, options) => {
+            harness.spawnCalls.push({ command, args, options });
             const proc = new EventEmitter();
             proc.stdout = new EventEmitter();
             proc.stderr = new EventEmitter();
@@ -270,6 +391,129 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
         };
         return harness;
     }
+
+    test('passes Jagex credentials only in the client process environment', async () => {
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+        const harness = fakeRuntimeHarness(probeOutput);
+
+        await launch(harness, {
+            profile: 'MainAccount',
+            displayName: 'Fake Character'
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(harness.spawnCalls).toHaveLength(2);
+        expect(harness.spawnCalls[0].options).toBeUndefined();
+        const launchCall = harness.spawnCalls[1];
+        expect(launchCall.options.env).toEqual(
+            expect.objectContaining({
+                JX_CHARACTER_ID: 'test-account',
+                JX_SESSION_ID: 'abc123',
+                JX_REFRESH_TOKEN: '',
+                JX_DISPLAY_NAME: 'Fake Character',
+                JX_ACCESS_TOKEN: '',
+                MICROBOT_CUT_CLIENT_TICKET: 'header.payload.signature',
+                MICROBOT_CUT_PRODUCT_API_BASE_URL: 'https://staging.example/api/v1',
+                MICROBOT_CUT_CLIENT_TICKET_KEY_ID: 'staging-2026-01',
+                MICROBOT_CUT_CLIENT_TICKET_AUDIENCE: 'microbot-cut-client'
+            })
+        );
+        expect(launchCall.args.join(' ')).not.toContain('abc123');
+        expect(launchCall.args.join(' ')).not.toContain('header.payload.signature');
+        expect(harness.log.info.mock.calls.flat().join(' ')).not.toContain('header.payload.signature');
+    });
+
+    test('plugin development mode requires an explicit launcher environment variable', async () => {
+        process.env.MICROBOT_CUT_PLUGIN_DEV = 'true';
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+        const harness = fakeRuntimeHarness(probeOutput);
+
+        await launch(harness);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(harness.spawnCalls[1].args).toContain(
+            '-Dmicrobot.plugins.developmentMode=true'
+        );
+        expect(harness.log.warn).toHaveBeenCalledWith(
+            'Plugin development mode enabled by MICROBOT_CUT_PLUGIN_DEV.'
+        );
+    });
+
+    test('development mode cannot mask a remote repository test', async () => {
+        process.env.MICROBOT_CUT_PLUGIN_DEV = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true';
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+        const harness = fakeRuntimeHarness(probeOutput);
+
+        await launch(harness);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(harness.spawnCalls[1].args).toContain(
+            '-Dmicrobot.plugins.developmentMode=true'
+        );
+        expect(harness.spawnCalls[1].args).not.toContain(
+            '-Dmicrobot.plugins.repository.enabled=true'
+        );
+        expect(harness.log.warn).toHaveBeenCalledWith(
+            'Plugin repository ignored while MICROBOT_CUT_PLUGIN_DEV is enabled.'
+        );
+    });
+
+    test('passes a validated plugin repository without logging the public key', async () => {
+        const { publicKey } = crypto.generateKeyPairSync('rsa', {
+            modulusLength: 2048
+        });
+        const encodedKey = publicKey
+            .export({ type: 'spki', format: 'der' })
+            .toString('base64');
+        process.env.MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_MANIFEST_URL =
+            'https://staging.example/plugins/catalog.json';
+        process.env.MICROBOT_CUT_PLUGIN_PUBLIC_KEY = encodedKey;
+        process.env.MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID = 'staging-2026';
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+        const harness = fakeRuntimeHarness(probeOutput);
+
+        await launch(harness);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const args = harness.spawnCalls[1].args;
+        expect(args).toEqual(
+            expect.arrayContaining([
+                '-Dmicrobot.plugins.repository.enabled=true',
+                '-Dmicrobot.plugins.manifestUrl=https://staging.example/plugins/catalog.json',
+                `-Dmicrobot.plugins.publicKey=${encodedKey}`,
+                '-Dmicrobot.plugins.publicKeyId=staging-2026'
+            ])
+        );
+        const launchLog = harness.log.info.mock.calls
+            .map((call) => call.join(' '))
+            .find((message) => message.includes('-jar'));
+        expect(launchLog).toContain(
+            '-Dmicrobot.plugins.publicKey=<configured>'
+        );
+        expect(launchLog).not.toContain(encodedKey);
+    });
 
     test('an unparseable Java version warns and still launches', async () => {
         const harness = fakeRuntimeHarness('    java.vendor = Mystery\n    sun.arch.data.model = 64\nmystery version "banana"\n');

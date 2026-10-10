@@ -255,6 +255,10 @@ webview#website {
     background: #3f4563;
 }
 
+.session-action.hidden {
+    display: none;
+}
+
 h2 {
     margin-bottom: 15px;
     font-size: 20px;
@@ -267,6 +271,39 @@ h2 {
     flex-wrap: wrap;
     position: relative;
     /* for overlay positioning */
+}
+
+.product-home {
+    display: none;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 32px;
+    text-align: center;
+    color: #f2efff;
+    background:
+        radial-gradient(circle at 50% 38%, rgb(116 80 214 / 24%), transparent 38%),
+        linear-gradient(145deg, #171322, #10121d);
+}
+
+.product-home img {
+    width: 180px;
+    height: 180px;
+    object-fit: contain;
+}
+
+.product-home h2,
+.product-home p {
+    margin: 0;
+}
+
+.product-home p,
+.product-home small {
+    color: #a5acc5;
 }
 
 .update {
@@ -312,6 +349,32 @@ h2 {
 .game-logo img {
     width: 200px;
     height: auto;
+}
+
+.game-logo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.product-mark {
+    display: grid;
+    width: 96px;
+    height: 96px;
+    place-items: center;
+    border: 2px solid #8f73ff;
+    border-radius: 24px;
+    background: linear-gradient(145deg, #2b2148, #151126);
+    color: #f2efff;
+    font-size: 34px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+}
+
+.game-logo small {
+    color: #a5acc5;
 }
 
 .refresh-btn {
@@ -649,6 +712,90 @@ h2 {
     margin-bottom: 10px;
     background-color: #242a3b;
     color: #ffffff;
+}
+
+.client-release-status {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid #2f3950;
+    border-radius: 8px;
+    background: #1a1f2d;
+}
+
+.client-release-status.hidden,
+.client-release-rollback.hidden {
+    display: none;
+}
+
+.client-release-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: #c6cce7;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.client-release-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #3a4057;
+    color: #e3e6ff;
+    font-size: 11px;
+    text-transform: capitalize;
+}
+
+.client-release-badge.healthy {
+    background: rgba(0, 212, 164, 0.16);
+    color: #7df7d8;
+}
+
+.client-release-badge.pending {
+    background: rgba(255, 190, 74, 0.16);
+    color: #ffd27c;
+}
+
+.client-release-badge.failed {
+    background: rgba(255, 92, 92, 0.16);
+    color: #ff9a9a;
+}
+
+.client-release-version {
+    margin-top: 7px;
+    color: #ffffff;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.client-release-detail {
+    margin-top: 4px;
+    color: #8991a9;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+.client-release-rollback {
+    width: 100%;
+    margin-top: 9px;
+    padding: 8px 10px;
+    border: 1px solid #59617e;
+    border-radius: 6px;
+    background: #2c3146;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.client-release-rollback:hover:not(:disabled) {
+    background: #3f4563;
+}
+
+.client-release-rollback:disabled {
+    cursor: wait;
+    opacity: 0.6;
 }
 
 .proxy-section select {

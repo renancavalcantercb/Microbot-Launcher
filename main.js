@@ -1,4 +1,14 @@
-const { app, BrowserWindow, dialog, shell, nativeImage, clipboard } = require('electron');
+const {
+    app,
+    BrowserWindow,
+    dialog,
+    shell,
+    nativeImage,
+    clipboard,
+    safeStorage,
+    Tray,
+    Menu
+} = require('electron');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
@@ -8,8 +18,14 @@ const log = require('electron-log');
 const { ipcMain } = require('electron');
 const AdmZip = require('adm-zip');
 const packageJson = require(path.join(__dirname, 'package.json'));
+const productConfig = require(path.join(__dirname, 'product-config.js'));
 const { spawn } = require('child_process');
-const { microbotDir, openLocation } = require(path.join(
+const {
+    microbotDir,
+    productDataDir,
+    legacyDataDir,
+    openLocation
+} = require(path.join(
     __dirname,
     'libs',
     'dir-module.js'
@@ -20,6 +36,19 @@ process.on('uncaughtException', (error) => {
 });
 
 let mainWindow = null;
+const { ClientLifecycle } = require(path.join(__dirname, 'libs', 'client-lifecycle.js'));
+const { LauncherTrayController } = require(path.join(__dirname, 'libs', 'launcher-tray.js'));
+const clientLifecycle = new ClientLifecycle();
+const trayController = new LauncherTrayController({
+    app,
+    Tray,
+    Menu,
+    iconPath: path.join(__dirname, productConfig.iconFile),
+    launcherName: productConfig.launcherName,
+    clientLifecycle,
+    log
+});
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 // Ensure the .microbot directory exists
 if (!fs.existsSync(microbotDir)) {
@@ -39,6 +68,8 @@ async function loadLibraries() {
             axios: axios,
             ipcMain: ipcMain,
             microbotDir: microbotDir,
+            productDataDir: productDataDir,
+            legacyDataDir: legacyDataDir,
             packageJson: packageJson,
             path: path,
             log: log,
@@ -49,7 +80,10 @@ async function loadLibraries() {
             projectDir: __dirname,
             fs: fs,
             app: app,
-            mainWindow: mainWindow
+            safeStorage: safeStorage,
+            mainWindow: mainWindow,
+            getMainWindow: () => mainWindow,
+            clientLifecycle
         };
         try {
             const mockAuthHandler = require(path.join(
@@ -82,9 +116,9 @@ async function createWindow() {
         width: 1280,
         height: process.env.DEBUG !== 'true' ? 750 : 800,
         show: false, // Don't show the main window immediately
-        title: 'Microbot Launcher',
+        title: productConfig.launcherName,
         autoHideMenuBar: process.env.DEBUG !== 'true',
-        icon: path.join(__dirname, 'images/microbot_transparent.ico'),
+        icon: path.join(__dirname, productConfig.iconFile),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             nodeIntegration: true,
@@ -98,6 +132,7 @@ async function createWindow() {
     if (process.platform === 'darwin') {
         mainWindow.setWindowButtonVisibility(false);
     }
+    trayController.attach(mainWindow);
 
     try {
         const extraHandlers = require(path.join(
@@ -156,20 +191,37 @@ autoUpdater.on('update-downloaded', () => {
         });
 });
 
-app.whenReady().then(async () => {
-    log.info('App starting...');
+if (!hasSingleInstanceLock) {
+    log.info('Another launcher instance is already running; exiting this instance.');
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        trayController.showWindow();
+    });
 
-    await loadLibraries();
-    await createWindow();
+    app.whenReady().then(async () => {
+        log.info('App starting...');
 
-    if (process.env.DEBUG !== 'true') {
-        mainWindow.show();
-        autoUpdater.checkForUpdates();
-    } else {
-        mainWindow.show();
-    }
-});
+        await loadLibraries();
+        await createWindow();
 
-app.on('window-all-closed', function () {
-    if (process.platform !== 'darwin') app.quit();
-});
+        if (process.env.DEBUG !== 'true') {
+            mainWindow.show();
+            if (productConfig.updateFilesBase) {
+                autoUpdater.checkForUpdates();
+            } else {
+                log.info('Launcher updates are disabled: no product update endpoint configured.');
+            }
+        } else {
+            mainWindow.show();
+        }
+    });
+
+    app.on('window-all-closed', function () {
+        if (process.platform !== 'darwin') app.quit();
+    });
+
+    app.on('activate', () => {
+        trayController.showWindow();
+    });
+}

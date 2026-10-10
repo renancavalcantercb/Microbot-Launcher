@@ -10,9 +10,31 @@ let launcherInitialized = false;
 let authUiReady = false;
 let mockAuthEnabled = false;
 let currentSessionEmail = '';
+let productSessionConnected = false;
+let latestClientReleaseStatus = null;
 
 function $(id) {
     return document.getElementById(id);
+}
+
+function applyProductIdentity() {
+    const product = window.electron.product;
+    document.title = product.launcherName;
+    document
+        .querySelectorAll('[data-product-name]')
+        .forEach((element) => {
+            element.textContent = product.productName;
+        });
+    document
+        .querySelectorAll('[data-launcher-name]')
+        .forEach((element) => {
+            element.textContent = product.launcherName;
+        });
+    document
+        .querySelectorAll('[data-product-credit]')
+        .forEach((element) => {
+            element.textContent = product.creditLine;
+        });
 }
 
 function toggleClass(element, className, shouldAdd) {
@@ -80,6 +102,49 @@ function hideAuthModal() {
     if (!modal) return;
     modal.classList.add('auth-hidden');
     setAuthError('');
+}
+
+function showProductAuthModal(message = '') {
+    $('product-auth-modal')?.classList.remove('auth-hidden');
+    setAuthError(message, 'product-auth-error');
+}
+
+function hideProductAuthModal() {
+    $('product-auth-modal')?.classList.add('auth-hidden');
+    setAuthError('', 'product-auth-error');
+}
+
+async function handleProductActivation(event) {
+    event.preventDefault();
+    const code = $('product-activation-code')?.value?.trim() || '';
+    const button = $('product-auth-submit');
+    setButtonLoading(button, true, 'Connecting...');
+    setAuthError('', 'product-auth-error');
+    try {
+        const result = await window.electron.productSession.activate(code);
+        if (!result?.authenticated) {
+            setAuthError(result?.error || 'Could not connect.', 'product-auth-error');
+            return;
+        }
+        $('product-activation-code').value = '';
+        await refreshAuthStatus();
+    } catch (error) {
+        setAuthError(error?.message || 'Could not connect.', 'product-auth-error');
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
+
+async function handleProductSignout() {
+    const button = $('product-signout-btn');
+    setButtonLoading(button, true, 'Signing out...');
+    try {
+        await window.electron.productSession.signout();
+        productSessionConnected = false;
+        await refreshAuthStatus();
+    } finally {
+        setButtonLoading(button, false);
+    }
 }
 
 function showChangePasswordModal() {
@@ -249,7 +314,120 @@ function setupAuthUI() {
     $('change-password-btn')?.addEventListener('click', showChangePasswordModal);
     $('change-password-cancel')?.addEventListener('click', hideChangePasswordModal);
     $('change-password-form')?.addEventListener('submit', handleChangePassword);
+    $('product-auth-form')?.addEventListener('submit', handleProductActivation);
+    $('product-signout-btn')?.addEventListener('click', handleProductSignout);
+    $('product-auth-site')?.addEventListener('click', () =>
+        window.electron.productSession.openAccount()
+    );
+    window.electron.productSession.onChanged?.(() => refreshAuthStatus());
+    setupClientReleaseUI();
     setActiveAuthTab('signin');
+}
+
+function releaseHealthLabel(health) {
+    return {
+        verified: 'Verified',
+        pending: 'Pending',
+        healthy: 'Healthy',
+        failed: 'Failed'
+    }[health] || 'Unknown';
+}
+
+function renderClientReleaseStatus(status) {
+    latestClientReleaseStatus = status;
+    const panel = $('client-release-status');
+    if (!panel) return;
+    toggleClass(panel, 'hidden', !status?.enabled);
+    if (!status?.enabled) return;
+
+    const selectedVersion = status.selectedVersion || getSelectedClientVersion();
+    const releases = Array.isArray(status.releases) ? status.releases : [];
+    const selectedRelease = releases.find((release) => release.version === selectedVersion);
+    const health = selectedRelease?.health || 'unmanaged';
+    const badge = $('client-release-badge');
+    if (badge) {
+        badge.textContent = selectedRelease ? releaseHealthLabel(health) : 'Local';
+        badge.className = `client-release-badge ${health}`;
+    }
+    if ($('client-release-version')) {
+        $('client-release-version').textContent = selectedVersion || 'No client selected';
+    }
+
+    const detail = $('client-release-detail');
+    if (detail) {
+        if (!selectedRelease) {
+            detail.textContent = 'This local build is not managed by the signed release channel.';
+        } else if (health === 'failed') {
+            detail.textContent = selectedRelease.lastFailure || 'Startup health check failed.';
+        } else if (health === 'pending') {
+            detail.textContent = 'Waiting for the client to confirm a healthy startup.';
+        } else if (health === 'healthy') {
+            detail.textContent = 'Startup and local integrity checks passed.';
+        } else {
+            detail.textContent = 'The signed file passed local integrity verification.';
+        }
+    }
+
+    const rollback = $('client-release-rollback');
+    const canRollback = Boolean(
+        status.lastKnownGoodVersion && status.lastKnownGoodVersion !== selectedVersion
+    );
+    toggleClass(rollback, 'hidden', !canRollback);
+    if (rollback && canRollback) {
+        rollback.textContent = `Use ${status.lastKnownGoodVersion}`;
+    }
+}
+
+async function refreshClientReleaseStatus() {
+    try {
+        renderClientReleaseStatus(await window.electron.clientRelease.status());
+    } catch (error) {
+        window.electron.logError(`Unable to read client release health: ${error.message}`);
+    }
+}
+
+function selectClientVersionInView(version) {
+    const clientSelect = $('client');
+    if (!clientSelect || !version) return;
+    const option = Array.from(clientSelect.options).find(
+        (candidate) => extractVersion(candidate.value) === version
+    );
+    if (option) clientSelect.value = option.value;
+}
+
+async function handleClientReleaseRollback() {
+    const version = latestClientReleaseStatus?.lastKnownGoodVersion;
+    if (!version) return;
+    const confirmed = await window.electron.showConfirmationDialog(
+        `Use ${version} on the next launch?`,
+        'The launcher will verify the signed metadata and the local JAR before changing your selected version. Running clients will remain open.',
+        'Use last-known-good release',
+        'Use release',
+        'Cancel'
+    );
+    if (confirmed !== true) return;
+
+    const button = $('client-release-rollback');
+    setButtonLoading(button, true, 'Verifying...');
+    try {
+        const result = await window.electron.clientRelease.rollback();
+        if (result?.error) {
+            await window.electron.errorAlert(result.error);
+            return;
+        }
+        selectClientVersionInView(result.version);
+        renderClientReleaseStatus(result.status);
+    } finally {
+        setButtonLoading(button, false);
+    }
+}
+
+function setupClientReleaseUI() {
+    $('client-release-rollback')?.addEventListener('click', handleClientReleaseRollback);
+    window.electron.clientRelease.onChanged?.((status) => {
+        selectClientVersionInView(status?.selectedVersion);
+        renderClientReleaseStatus(status);
+    });
 }
 
 async function refreshAuthStatus() {
@@ -264,7 +442,21 @@ async function refreshAuthStatus() {
     if (!mockAuthEnabled) {
         hideAuthModal();
         hideChangePasswordModal();
-        updateSessionEmail(status?.user?.email || '');
+        const productStatus = await window.electron.productSession.status();
+        productSessionConnected = Boolean(productStatus?.authenticated);
+        const signoutButton = $('product-signout-btn');
+        toggleClass(signoutButton, 'hidden', !productSessionConnected);
+        if (!productSessionConnected) {
+            updateSessionEmail('');
+            showProductAuthModal(productStatus?.error || '');
+            return;
+        }
+        hideProductAuthModal();
+        const productIdentity = productStatus.plan?.name
+            ? `${productStatus.device?.name || 'Microbot Cut'} · ${productStatus.plan.name}`
+            : productStatus.device?.name || 'Microbot Cut';
+        updateSessionEmail(productIdentity);
+        $('user-session')?.classList.remove('hidden');
         await ensureLauncherInitialized();
         return;
     }
@@ -328,13 +520,10 @@ async function openClient() {
             if (result?.error) {
                 window.electron.logError(result.error);
             }
-            await window.electron.overwriteCredentialProperties(
-                selectedAccount
-            );
             const launchResult = await window.electron.openClient(
                 version,
                 proxy,
-                selectedAccount,
+                selectedAccount.accountId,
                 ramPreference
             );
             if (launchResult?.error) {
@@ -579,6 +768,7 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 
 async function initializeLauncher() {
+    const product = window.electron.product;
     const properties = await window.electron.readProperties();
 
     const clientVersion = rememberLatestClientVersion(
@@ -588,7 +778,7 @@ async function initializeLauncher() {
     const microbotLauncherVersion = await window.electron.launcherVersion();
 
     document.querySelector('.titlebar-title').innerText =
-        'Microbot Launcher - ' + microbotLauncherVersion;
+        product.launcherName + ' - ' + microbotLauncherVersion;
 
     if (properties['client'] === '0.0.0') {
         document.getElementById('loader-container').style.display = 'block';
@@ -668,6 +858,7 @@ async function initializeLauncher() {
 
     //Init buttons and UI
     await initUI(properties);
+    await refreshClientReleaseStatus();
 
     await checkForClientUpdate(properties);
 
@@ -686,6 +877,7 @@ async function initializeLauncher() {
 }
 
 window.addEventListener('load', async () => {
+    applyProductIdentity();
     setupAuthUI();
     await refreshAuthStatus();
 });
@@ -762,7 +954,7 @@ function populateAccountSelector(characters = [], selectedAccount = null) {
     // Iterate over the characters array and create option elements
     characters.forEach((character) => {
         const option = document.createElement('option');
-        option.value = character.accountId; // Set sessionId as the value
+        option.value = character.accountId;
         option.textContent = character.displayName; // Set displayName as the text
         characterSelect.appendChild(option); // Add the option to the select element
     });
@@ -1443,17 +1635,14 @@ async function setVersionPreference(properties) {
         });
     }
 
-    /**
-     * Remove any other listeners before adding a new one
-     */
     const clientSelect = document.getElementById('client');
-    clientSelect.replaceWith(clientSelect.cloneNode(true));
+    clientSelect.removeEventListener('change', handleClientVersionChange);
+    clientSelect.addEventListener('change', handleClientVersionChange);
+}
 
-    document
-        .getElementById('client')
-        .addEventListener('change', async (event) => {
-            await updateVersionPreference(event);
-        });
+async function handleClientVersionChange(event) {
+    await updateVersionPreference(event);
+    await refreshClientReleaseStatus();
 }
 
 async function updateVersionPreference(event) {
@@ -1645,6 +1834,44 @@ function setupHamburgerMenu() {
         });
     });
 
+    const importItem = document.getElementById('import-legacy-data');
+    importItem?.addEventListener('click', async () => {
+        hideMenu();
+        const status = await window.electron.dataDirectoryStatus();
+        if (status?.importComplete) {
+            window.electron.errorAlert(
+                'Existing data has already been imported into the product directory.'
+            );
+            return;
+        }
+        const confirmed = await window.electron.showConfirmationDialog(
+            'Import existing data?',
+            'Active accounts, settings and recognized client JARs will be copied to the new product directory. The original directory will remain unchanged.',
+            'Import Existing Data',
+            'Import',
+            'Cancel',
+            { defaultId: 1, cancelId: 1, confirmIndex: 0 }
+        );
+        if (confirmed !== true) return;
+
+        const result = await window.electron.importLegacyData();
+        if (result?.error) {
+            window.electron.errorAlert(`Data import failed: ${result.error}`);
+            return;
+        }
+        const restart = await window.electron.showConfirmationDialog(
+            'Import complete',
+            `${result.files?.length || 0} verified file(s) were copied. Restart the launcher now to use the new directory.`,
+            'Restart Required',
+            'Restart now',
+            'Later',
+            { defaultId: 0, cancelId: 1, confirmIndex: 0, type: 'info' }
+        );
+        if (restart === true) {
+            await window.electron.relaunchLauncher();
+        }
+    });
+
     let hideTimeout = null;
     const scheduleHide = () => {
         hideTimeout = setTimeout(() => hideMenu(), 200);
@@ -1712,8 +1939,19 @@ async function checkForClientUpdate(properties) {
 function loadLandingPageWebview() {
     const webview = document.getElementById('website');
     const webviewOverlay = document.getElementById('embed-overlay');
+    const productHome = document.getElementById('product-home');
+    const landingPageUrl = window.electron.product.landingPageUrl;
+
+    if (!landingPageUrl) {
+        if (webview) webview.style.display = 'none';
+        if (webviewOverlay) webviewOverlay.style.display = 'none';
+        if (productHome) productHome.style.display = 'flex';
+        return;
+    }
+
     if (webview) {
-        webview.src = 'https://www.themicrobot.com?source=launcher';
+        if (productHome) productHome.style.display = 'none';
+        webview.src = landingPageUrl;
         webview.addEventListener('dom-ready', () => {
             try {
                 webview
@@ -1865,7 +2103,7 @@ async function checkForOutdatedLaunch() {
     );
     if (selectedJar?.kind === 'custom') {
         window.electron.logError(
-            `Launching custom client ${selectedVersion}; latest official is ${latestVersion}`
+            `Launching custom client ${selectedVersion}; latest product release is ${latestVersion}`
         );
         return;
     }

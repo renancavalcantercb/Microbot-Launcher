@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const productConfig = require('./product-config.js');
 
 contextBridge.exposeInMainWorld('electron', {
+    product: productConfig,
     closeLauncher: () => ipcRenderer.invoke('close-launcher'),
     minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
     maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
@@ -14,12 +16,12 @@ contextBridge.exposeInMainWorld('electron', {
     fetchLauncherVersion: () => ipcRenderer.invoke('fetch-launcher-version'), //jagex launcher
     fetchClientVersion: () => ipcRenderer.invoke('fetch-client-version'),
     openLauncher: () => ipcRenderer.invoke('open-launcher'),
-    openClient: (version, proxy, account, ramPreference) =>
+    openClient: (version, proxy, accountId, ramPreference) =>
         ipcRenderer.invoke(
             'open-client',
             version,
             proxy,
-            account,
+            accountId,
             ramPreference
         ),
     readAccounts: () => ipcRenderer.invoke('read-accounts'),
@@ -33,8 +35,6 @@ contextBridge.exposeInMainWorld('electron', {
     readNonJagexProfile: () => ipcRenderer.invoke('read-non-jagex-profile'),
     clientExists: (version) => ipcRenderer.invoke('client-exists', version),
     launcherExists: () => ipcRenderer.invoke('launcher-exists'),
-    overwriteCredentialProperties: (character) =>
-        ipcRenderer.invoke('overwrite-credential-properties', character),
     checkFileChange: () => ipcRenderer.invoke('check-file-change'),
     playNoJagexAccount: (version, proxy, ramPreference) =>
         ipcRenderer.invoke(
@@ -69,6 +69,9 @@ contextBridge.exposeInMainWorld('electron', {
         ),
     openLocation: (locationKey) =>
         ipcRenderer.invoke('open-location', locationKey),
+    dataDirectoryStatus: () => ipcRenderer.invoke('data-directory-status'),
+    importLegacyData: () => ipcRenderer.invoke('import-legacy-data'),
+    relaunchLauncher: () => ipcRenderer.invoke('relaunch-launcher'),
     cleanUnusedClients: (latestVersion) =>
         ipcRenderer.invoke('cleanup-unused-clients-jar', latestVersion),
     updateClientJarTTL: (version) =>
@@ -81,6 +84,26 @@ contextBridge.exposeInMainWorld('electron', {
         changePassword: (payload) =>
             ipcRenderer.invoke('auth:changepw', payload),
         status: () => ipcRenderer.invoke('auth:status')
+    },
+    productSession: {
+        activate: (code) => ipcRenderer.invoke('product-session:activate', code),
+        status: () => ipcRenderer.invoke('product-session:status'),
+        signout: () => ipcRenderer.invoke('product-session:signout'),
+        openAccount: () => ipcRenderer.invoke('product-session:open-account'),
+        onChanged: (callback) => {
+            const listener = (_event, status) => callback(status);
+            ipcRenderer.on('product-session:changed', listener);
+            return () => ipcRenderer.removeListener('product-session:changed', listener);
+        }
+    },
+    clientRelease: {
+        status: () => ipcRenderer.invoke('client-release:status'),
+        rollback: () => ipcRenderer.invoke('client-release:rollback'),
+        onChanged: (callback) => {
+            const listener = (_event, status) => callback(status);
+            ipcRenderer.on('client-release:changed', listener);
+            return () => ipcRenderer.removeListener('client-release:changed', listener);
+        }
     },
     ipcRenderer: {
         send: (channel, data) => ipcRenderer.send(channel, data),

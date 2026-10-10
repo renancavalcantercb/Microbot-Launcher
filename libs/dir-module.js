@@ -1,6 +1,7 @@
 const os = require('os');
 const path = require('path');
 const fsSync = require('fs');
+const productConfig = require('../product-config');
 const {
     parseClientJar,
     isSafeClientVersion,
@@ -18,8 +19,32 @@ function getShell() {
 }
 
 // commonly used internal locations (create if missing on demand)
+function resolveDataDirectories(homeDirectory) {
+    return {
+        productDataDir: path.join(
+            homeDirectory,
+            productConfig.dataDirectoryName
+        ),
+        legacyDataDir: path.join(
+            homeDirectory,
+            productConfig.legacyDataDirectoryName
+        )
+    };
+}
+
+function resolveActiveDataDirectory(fileSystem, productDirectory, legacyDirectory) {
+    const marker = path.join(productDirectory, IMPORT_MARKER);
+    return fileSystem.existsSync(marker) ? productDirectory : legacyDirectory;
+}
+
 const homeDir = os.homedir();
-const microbotDir = path.join(homeDir, '.microbot');
+const { productDataDir, legacyDataDir } = resolveDataDirectories(homeDir);
+const { IMPORT_MARKER } = require('./data-directory-importer');
+const microbotDir = resolveActiveDataDirectory(
+    fsSync,
+    productDataDir,
+    legacyDataDir
+);
 const runeliteDir = path.join(homeDir, '.runelite');
 const clientLogs = path.join(runeliteDir, 'logs', 'client.log');
 const launcherLogs = () => {
@@ -29,7 +54,7 @@ const launcherLogs = () => {
                 homeDir,
                 'AppData',
                 'Roaming',
-                'microbot-launcher',
+                productConfig.launcherDataDirectoryName,
                 'logs',
                 'main.log'
             );
@@ -38,14 +63,14 @@ const launcherLogs = () => {
                 homeDir,
                 'Library',
                 'Logs',
-                'microbot-launcher',
+                productConfig.launcherDataDirectoryName,
                 'main.log'
             );
         case 'linux':
             return path.join(
                 homeDir,
                 '.config',
-                'microbot-launcher',
+                productConfig.launcherDataDirectoryName,
                 'logs',
                 'main.log'
             );
@@ -246,6 +271,10 @@ async function updateClientJarTTL(version) {
 
 module.exports = {
     microbotDir,
+    productDataDir,
+    legacyDataDir,
+    resolveDataDirectories,
+    resolveActiveDataDirectory,
     openLocation,
     getClientsJarTTL,
     cleanupUnusedClientsJar,

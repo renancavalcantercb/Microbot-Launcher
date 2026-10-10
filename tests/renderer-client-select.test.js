@@ -12,6 +12,8 @@ function createSelect() {
     const select = {
         options: [],
         selectedIndex: -1,
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
         get value() {
             return this.selectedIndex >= 0 ? this.options[this.selectedIndex].value : '';
         },
@@ -96,7 +98,7 @@ describe('renderer client version select', () => {
         });
         const source = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
         vm.runInContext(
-            `${source}\nglobalThis.__renderer = { checkForOutdatedLaunch, populateAndSelectClientVersion, selectClientVersion, shouldPromptForClientDownload, orderClientJarsByVersion, rememberLatestClientVersion };`,
+            `${source}\nglobalThis.__renderer = { checkForOutdatedLaunch, populateAndSelectClientVersion, selectClientVersion, setVersionPreference, shouldPromptForClientDownload, orderClientJarsByVersion, rememberLatestClientVersion };`,
             context
         );
         context.__renderer.rememberLatestClientVersion('2.6.28');
@@ -125,6 +127,26 @@ describe('renderer client version select', () => {
         await context.__renderer.selectClientVersion('2.6.28-dev');
         expect(select.value).toBe('microbot-2.6.28-dev.jar');
         expect(properties.version_pref).toBe('2.6.28-dev');
+    });
+
+    test('keeps the saved custom version selected while binding its change listener', async () => {
+        const jars = await context.__renderer.orderClientJarsByVersion();
+        context.populateSelectElement('client', jars);
+
+        await context.__renderer.setVersionPreference({
+            client: '2.6.28',
+            version_pref: '2.6.28-dev'
+        });
+
+        expect(select.value).toBe('microbot-2.6.28-dev.jar');
+        expect(select.removeEventListener).toHaveBeenCalledWith(
+            'change',
+            expect.any(Function)
+        );
+        expect(select.addEventListener).toHaveBeenCalledWith(
+            'change',
+            expect.any(Function)
+        );
     });
 
     test('a custom jar sharing the latest version does not count as the latest', async () => {

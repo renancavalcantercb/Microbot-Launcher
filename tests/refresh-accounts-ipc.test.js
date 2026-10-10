@@ -94,6 +94,10 @@ describe('refresh-accounts IPC handler', () => {
         expect(result.accounts.length).toBe(2);
         const ids = result.accounts.map((a) => a.accountId).sort();
         expect(ids).toEqual(['acc1', 'acc2']);
+        expect(JSON.stringify(result.accounts)).not.toContain('SESSION123');
+        expect(result.accounts.every((account) => !('sessionId' in account))).toBe(
+            true
+        );
     });
 
     test('refresh-accounts refreshes every stored Jagex session', async () => {
@@ -161,7 +165,7 @@ describe('refresh-accounts IPC handler', () => {
         expect(result.warning).toMatch(/1 of 3 Jagex session/);
         expect(result.accounts.map((a) => a.displayName)).toEqual([
             'Name-acc1',
-            null,
+            'Not set',
             'Name-acc3'
         ]);
     });

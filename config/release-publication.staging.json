@@ -1,0 +1,14 @@
+{
+  "channel": "staging",
+  "bucket": "microbot-cut-artifacts-staging",
+  "publicBaseUrl": "https://cut-staging.xulixnacc.online/api/v1/",
+  "manifestUrl": "https://cut-staging.xulixnacc.online/api/v1/releases/staging/manifest",
+  "keyId": "release-staging-2026-01",
+  "privateKeyFile": "../.secrets/release-staging-2026-01.pem",
+  "publicKeyFile": "release-staging-2026-01.public.json",
+  "minimumLauncherVersion": "3.2.10",
+  "clientRepository": "../../Microbot",
+  "backendRepository": "../../microbot-cut-backend",
+  "gradleUserHome": "../../.gradle-final",
+  "sourceJar": "../../Microbot/runelite-client/build/libs/microbot-2.6.30.jar"
+}
