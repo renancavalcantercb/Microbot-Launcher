@@ -260,7 +260,9 @@ describe('client jar cleanup and listing with an isolated home', () => {
                     })
                 });
             const releaseAxios = jest.fn().mockResolvedValue({
-                data: Readable.from([downloadedArtifact])
+                data: Readable.from(
+                    Array.isArray(downloadedArtifact) ? downloadedArtifact : [downloadedArtifact]
+                )
             });
             releaseAxios.get = jest.fn().mockResolvedValue({ data: envelope });
             const ipcHandlers = require('../libs/ipc-handlers.js');
@@ -325,6 +327,26 @@ describe('client jar cleanup and listing with an isolated home', () => {
                     responseType: 'stream'
                 })
             );
+        });
+
+        test('limits renderer progress updates while streaming a signed client', async () => {
+            const artifact = Buffer.alloc(1000, 7);
+            const chunks = Array.from(artifact, (byte) => Buffer.from([byte]));
+            const { releaseHandlers, version } = await signedReleaseHandlers({
+                downloadedArtifact: chunks,
+                signedArtifact: artifact
+            });
+            const sender = { send: jest.fn() };
+
+            await expect(
+                releaseHandlers['download-client']({ sender }, version)
+            ).resolves.toMatchObject({ success: true, verified: true });
+
+            expect(sender.send.mock.calls.length).toBeLessThanOrEqual(103);
+            expect(sender.send).toHaveBeenLastCalledWith('progress', {
+                percent: 100,
+                status: 'Verified download completed!'
+            });
         });
 
         test('rejects corrupt bytes from the signed client download', async () => {

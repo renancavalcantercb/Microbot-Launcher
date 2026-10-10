@@ -476,6 +476,7 @@ module.exports = async function (deps) {
                     percent: 10,
                     status: `Downloading verified client ${version}...`
                 });
+                let lastReportedDownloadPercent = -1;
                 const result = await downloadVerifiedArtifact({
                     httpClient: axios,
                     url: releaseManifestService.resolveArtifactUrl(
@@ -486,6 +487,9 @@ module.exports = async function (deps) {
                     expectedSha256: release.client.sha256,
                     onProgress: ({ bytes, total }) => {
                         const transferPercent = (bytes * 100) / total;
+                        const wholePercent = Math.min(100, Math.floor(transferPercent));
+                        if (wholePercent === lastReportedDownloadPercent) return;
+                        lastReportedDownloadPercent = wholePercent;
                         event.sender.send('progress', {
                             percent: (10 + transferPercent * 0.8).toFixed(2),
                             status: `Downloading verified client ${version}... (${transferPercent.toFixed(2)}%)`
