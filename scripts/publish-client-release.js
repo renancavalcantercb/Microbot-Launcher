@@ -118,12 +118,26 @@ function runGradleBuild(config) {
 }
 
 function wrangler(config, args, { allowMissing = false } = {}) {
-    const executable = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    const result = childProcess.spawnSync(executable, ['wrangler', ...args], {
+    const executable = path.join(
+        config.backendRepository,
+        'node_modules',
+        'wrangler',
+        'bin',
+        'wrangler.js'
+    );
+    if (!fs.existsSync(executable)) {
+        throw new Error(
+            `Wrangler is not installed in the backend repository (${executable}); run npm install there first`
+        );
+    }
+    const result = childProcess.spawnSync(process.execPath, [executable, ...args], {
         cwd: config.backendRepository,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe']
     });
+    if (result.error) {
+        throw new Error(`Wrangler could not start: ${result.error.message}`);
+    }
     if (result.status === 0) return true;
     const details = `${result.stderr || ''}\n${result.stdout || ''}`.trim();
     if (allowMissing && /not found|does not exist|10007/i.test(details)) return false;
