@@ -1,6 +1,24 @@
 # Microbot-Launcher
 Microbot Launcher for The Microbot Client
 
+## Microbot Cut fork
+
+This fork owns Microbot Cut product authentication, protected local account
+storage, the client authorization broker, signed client updates, startup health
+acknowledgement, and last-known-good rollback. Run the current staging setup with:
+
+```powershell
+npm.cmd run dev:staging
+```
+
+The current staging client is `cut-2.6.30-p17`, signed release sequence 3. It
+has passed verified download, startup acknowledgement, and last-known-good
+persistence. Release commands are defined by `npm.cmd run release:client` and
+must follow prepare, immutable stage, explicit promote, and verify.
+
+Staging is currently an operator-selected environment. Server-controlled
+stable/beta/internal cohorts are designed but not implemented yet.
+
 <img width="1915" height="1197" alt="image" src="https://github.com/user-attachments/assets/dfa1f620-ed5a-409c-97f0-f2c6e86e9a8a" />
 
 
