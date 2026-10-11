@@ -11,6 +11,17 @@ acknowledgement, and last-known-good rollback. Run the current staging setup wit
 npm.cmd run dev:staging
 ```
 
+Run the production account and stable release profile with:
+
+```powershell
+npm.cmd run dev:production
+```
+
+The production profile uses the production API and defaults to the independently
+signed production client channel. It can still honor an authorized beta cohort,
+but the external plugin repository remains disabled until the production plugin
+catalog has its own signing key and publication pipeline.
+
 The current staging client is `cut-2.6.30-p17`, signed release sequence 3. It
 has passed verified download, startup acknowledgement, and last-known-good
 persistence. Release commands are defined by `npm.cmd run release:client` and

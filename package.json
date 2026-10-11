@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "cross-env DEBUG=true electron .",
     "dev:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1",
+    "dev:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-product-production.ps1",
     "dev:plugin-staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1",
     "dev:mock": "cross-env DEBUG=true MOCK_AUTH=1 MOCK_USERS='demo@microbot.com:DemoPassword123,test@example.com:TestPassword123' electron .",
     "start": "electron-forge start",
