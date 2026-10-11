@@ -640,8 +640,7 @@ module.exports = async function (deps) {
 
     ipcMain.handle('client-exists', async (event, version) => {
         if (!isSafeClientVersion(version)) {
-            invalidVersionResult(version);
-            return false;
+            return invalidVersionResult(version);
         }
         try {
             const filePath = path.join(microbotDir, `microbot-${version}.jar`);
@@ -666,7 +665,7 @@ module.exports = async function (deps) {
             return true;
         } catch (error) {
             log.error(`Error checking if client exists: ${error}`);
-            return false;
+            return { error: error.message };
         }
     });
 

@@ -65,6 +65,11 @@ function setButtonLoading(button, isLoading, loadingText) {
     }
 }
 
+function hideDownloadProgress() {
+    const loader = document.getElementById('loader-container');
+    if (loader) loader.style.display = 'none';
+}
+
 function setAuthError(message, elementId = 'auth-error', isSuccess = false) {
     const element = $(elementId);
     if (!element) return;
@@ -644,7 +649,7 @@ async function playButtonClickHandler() {
         await runJagexLogin(playBtn);
         return;
     }
-    await checkForOutdatedLaunch();
+    if (!(await checkForOutdatedLaunch())) return;
 
     if (
         playBtn?.innerText.toLowerCase() ===
@@ -771,16 +776,22 @@ async function initializeLauncher() {
     const product = window.electron.product;
     const properties = await window.electron.readProperties();
 
-    const clientVersion = rememberLatestClientVersion(
+    const initialVersionResult = clientVersionResult(
         await window.electron.fetchClientVersion()
     );
+    const clientVersion = initialVersionResult.version;
+    if (initialVersionResult.error) {
+        window.electron.logError(
+            `Client release discovery unavailable: ${initialVersionResult.error}`
+        );
+    }
 
     const microbotLauncherVersion = await window.electron.launcherVersion();
 
     document.querySelector('.titlebar-title').innerText =
         product.launcherName + ' - ' + microbotLauncherVersion;
 
-    if (properties['client'] === '0.0.0') {
+    if (properties['client'] === '0.0.0' && clientVersion) {
         document.getElementById('loader-container').style.display = 'block';
         const result = await window.electron.downloadClient(clientVersion);
         if (result?.error) {
@@ -795,9 +806,11 @@ async function initializeLauncher() {
 
     await window.electron.writeProperties(properties);
 
-    const result = await window.electron.cleanUnusedClients(clientVersion);
-    if (result?.error) {
-        window.electron.logError(result.error);
+    if (clientVersion) {
+        const result = await window.electron.cleanUnusedClients(clientVersion);
+        if (result?.error) {
+            window.electron.logError(result.error);
+        }
     }
 
     /*
@@ -1447,7 +1460,7 @@ function playNoJagexAccount() {
     const playNoJagexButton = document.getElementById('play-no-jagex-account');
     playNoJagexButton?.removeEventListener('click', playButtonClickHandler);
     playNoJagexButton?.addEventListener('click', async () => {
-        await checkForOutdatedLaunch();
+        if (!(await checkForOutdatedLaunch())) return;
 
         const proxy = getProxyValues();
         const ramPreference = getClientRamPreference();
@@ -1500,7 +1513,13 @@ function playNoJagexAccount() {
  * @returns {Promise<{exists: boolean}>}
  */
 async function downloadClientIfNotExist(version) {
-    if (!(await window.electron.clientExists(version))) {
+    const existence = await window.electron.clientExists(version);
+    if (existence?.error) {
+        hideDownloadProgress();
+        await window.electron.errorAlert(existence.error);
+        return { exists: false, error: existence.error };
+    }
+    if (!existence) {
         window.electron.logError(
             `Client ${version} does not exist. Downloading...`
         );
@@ -1509,8 +1528,9 @@ async function downloadClientIfNotExist(version) {
         /** @type {{success: boolean, error?: string, path?: string}} */
         const result = await window.electron.downloadClient(version);
         if (result?.error) {
-            window.electron.errorAlert(result.error);
-            return { exists: false };
+            hideDownloadProgress();
+            await window.electron.errorAlert(result.error);
+            return { exists: false, error: result.error };
         }
     }
     window.electron.logError(`Client ${version} is ready.`);
@@ -1525,9 +1545,15 @@ function updateNowBtn() {
             if (iii) clearInterval(iii);
             document.querySelector('#update-available').style = 'display:none';
             document.getElementById('loader-container').style.display = 'block';
-            const clientVersion = rememberLatestClientVersion(
+            const latestResult = clientVersionResult(
                 await window.electron.fetchClientVersion()
             );
+            if (latestResult.error) {
+                hideDownloadProgress();
+                await window.electron.errorAlert(latestResult.error);
+                return;
+            }
+            const clientVersion = latestResult.version;
             const result = await window.electron.downloadClient(clientVersion);
             if (result?.error) {
                 window.electron.errorAlert(result.error);
@@ -1901,9 +1927,16 @@ function setupHamburgerMenu() {
  * @param {MicrobotProperties} properties - The properties object containing client information.
  */
 async function checkForClientUpdate(properties) {
-    const clientVersion = rememberLatestClientVersion(
+    const latestResult = clientVersionResult(
         await window.electron.fetchClientVersion()
     );
+    if (latestResult.error) {
+        window.electron.logError(
+            `Client release discovery unavailable: ${latestResult.error}`
+        );
+        return;
+    }
+    const clientVersion = latestResult.version;
     window.electron.logError(
         `Current client version: ${clientVersion}, properties client version: ${properties['client']}`
     );
@@ -2024,6 +2057,16 @@ function rememberLatestClientVersion(version) {
     return version;
 }
 
+function clientVersionResult(result) {
+    if (result?.error) {
+        return { error: result.error, version: null };
+    }
+    if (typeof result !== 'string' || !result) {
+        return { error: 'The update service returned an invalid client version', version: null };
+    }
+    return { error: null, version: rememberLatestClientVersion(result) };
+}
+
 /**
  * Check if the latest client available is installed.
  * If not, make sure it's not written on properties file so it can be prompted
@@ -2089,11 +2132,15 @@ async function shouldPromptForClientDownload(
 async function checkForOutdatedLaunch() {
     const selectedFile = document.getElementById('client').value;
     const selectedVersion = extractVersion(selectedFile);
-    const latestVersion = extractVersion(
-        rememberLatestClientVersion(
-            await window.electron.fetchClientVersion()
-        )
+    const latestResult = clientVersionResult(
+        await window.electron.fetchClientVersion()
     );
+    if (latestResult.error) {
+        hideDownloadProgress();
+        await window.electron.errorAlert(latestResult.error);
+        return false;
+    }
+    const latestVersion = extractVersion(latestResult.version);
 
     window.electron.logError(
         `Selected version: ${selectedVersion}, Latest version: ${latestVersion}`
@@ -2105,7 +2152,7 @@ async function checkForOutdatedLaunch() {
         window.electron.logError(
             `Launching custom client ${selectedVersion}; latest product release is ${latestVersion}`
         );
-        return;
+        return true;
     }
     if (
         selectedVersion !== latestVersion &&
@@ -2127,9 +2174,11 @@ async function checkForOutdatedLaunch() {
             sessionStorage.setItem('skippedVersion', latestVersion);
         } else {
             // User chose to launch with the latest version, download if not exist
-            await downloadClientIfNotExist(latestVersion);
+            const result = await downloadClientIfNotExist(latestVersion);
+            if (!result.exists) return false;
         }
     }
+    return true;
 }
 
 /**

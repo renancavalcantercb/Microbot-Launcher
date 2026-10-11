@@ -87,7 +87,7 @@ describe('renderer client version select', () => {
             showConfirmationDialog: jest.fn().mockResolvedValue(true),
             clientExists: (version) => handlers['client-exists']({}, version),
             downloadClient: jest.fn().mockResolvedValue({ error: 'offline' }),
-            errorAlert: noop
+            errorAlert: jest.fn()
         };
         dialog = electron.showConfirmationDialog;
         context = vm.createContext({
@@ -175,5 +175,18 @@ describe('renderer client version select', () => {
 
         expect(dialog).toHaveBeenCalledTimes(1);
         expect(select.value).toBe('microbot-2.6.2.jar');
+    });
+
+    test('stops launch version checks when release channel access is denied', async () => {
+        context.window.electron.fetchClientVersion = async () => ({
+            error: 'Your stable release cohort cannot access the staging channel'
+        });
+
+        await expect(context.__renderer.checkForOutdatedLaunch()).resolves.toBe(false);
+
+        expect(context.window.electron.errorAlert).toHaveBeenCalledWith(
+            'Your stable release cohort cannot access the staging channel'
+        );
+        expect(dialog).not.toHaveBeenCalled();
     });
 });

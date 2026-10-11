@@ -198,7 +198,9 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 expect(await handlers['download-client']({ sender }, version)).toEqual({
                     error: `Invalid client version: ${JSON.stringify(String(version))}`
                 });
-                expect(await handlers['client-exists']({}, version)).toBe(false);
+                expect(await handlers['client-exists']({}, version)).toEqual({
+                    error: `Invalid client version: ${JSON.stringify(String(version))}`
+                });
                 expect((await handlers['open-client']({}, version, {}, {}, '1g')).error).toMatch(/^Invalid client version/);
                 expect((await handlers['play-no-jagex-account']({}, version, {}, '1g')).error).toMatch(/^Invalid client version/);
             }
@@ -222,7 +224,14 @@ describe('client jar cleanup and listing with an isolated home', () => {
             expect(exists('downloaded_clients.json')).toBe(false);
         });
 
-        async function signedReleaseHandlers({ downloadedArtifact, signedArtifact }) {
+        async function signedReleaseHandlers({
+            downloadedArtifact,
+            signedArtifact,
+            authorizeReleaseChannel = jest.fn().mockResolvedValue({
+                releaseCohort: 'beta',
+                allowedReleaseChannels: ['production', 'staging']
+            })
+        }) {
             const releaseHandlers = {};
             const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
             const version = 'cut-2.6.31-p1';
@@ -283,10 +292,7 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 projectDir: path.join(__dirname, '..'),
                 app: {},
                 environment: {},
-				authorizeReleaseChannel: jest.fn().mockResolvedValue({
-					releaseCohort: 'beta',
-					allowedReleaseChannels: ['production', 'staging']
-				}),
+                authorizeReleaseChannel,
                 productConfig: {
                     ...require('../product-config'),
                     updateApiBase: null,
@@ -353,6 +359,21 @@ describe('client jar cleanup and listing with an isolated home', () => {
             });
         });
 
+        test('reports release channel denial instead of treating a local client as missing', async () => {
+            const denial = 'Your stable release cohort cannot access the staging channel';
+            const artifact = Buffer.from('signed-client-jar');
+            const { releaseHandlers, version } = await signedReleaseHandlers({
+                downloadedArtifact: artifact,
+                signedArtifact: artifact,
+                authorizeReleaseChannel: jest.fn().mockRejectedValue(new Error(denial))
+            });
+            fs.writeFileSync(path.join(microbotDir, `microbot-${version}.jar`), artifact);
+
+            await expect(releaseHandlers['client-exists']({}, version)).resolves.toEqual({
+                error: denial
+            });
+        });
+
         test('rejects corrupt bytes from the signed client download', async () => {
             const { releaseHandlers, version } = await signedReleaseHandlers({
                 downloadedArtifact: Buffer.from('mismatch-client-jar'),
@@ -385,7 +406,9 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 Buffer.from('tampered-client-jar')
             );
 
-            await expect(releaseHandlers['client-exists']({}, version)).resolves.toBe(false);
+            await expect(releaseHandlers['client-exists']({}, version)).resolves.toEqual({
+                error: `client ${version} failed local integrity verification; reinstall this release`
+            });
             await expect(
                 releaseHandlers['open-client']({}, version, {}, null, '1g')
             ).resolves.toEqual({
