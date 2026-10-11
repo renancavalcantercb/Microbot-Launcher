@@ -1,6 +1,12 @@
 # Microbot-Launcher
 Microbot Launcher for The Microbot Client
 
+This launcher is licensed under GNU GPL version 3 only. The complete
+corresponding source for every distributed Microbot Cut Launcher build must be
+offered alongside that build. Keep the source archive produced by the release
+workflow next to the installer and retain the upstream copyright notices. See
+[`LICENSE`](LICENSE).
+
 ## Microbot Cut fork
 
 This fork owns Microbot Cut product authentication, protected local account
@@ -91,6 +97,18 @@ The launcher now includes an optional in-memory authentication flow that can be 
 When mock mode is disabled, the launcher skips the mock login screen and behaves as before.
 
 ## Package for Windows
+For an unsigned local test package:
+
+```powershell
+npm.cmd run release:windows:unsigned
+```
+
+Production packages must use `npm.cmd run release:windows:production`. That
+command requires either PFX credentials (`WIN_CSC_LINK` and
+`WIN_CSC_KEY_PASSWORD`) or Azure Trusted Signing configuration, enables
+fail-closed code signing, and verifies the Authenticode publisher after the
+build. Manifest signing keys are separate and cannot be used for Authenticode.
+
 For 64-bit
 ```bash
 npm run build:x64

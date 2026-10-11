@@ -15,6 +15,8 @@
     "test:coverage": "jest --coverage",
     "product:sync": "node scripts/sync-product-config.js",
     "release": "npm run product:sync && electron-builder --publish never",
+    "release:windows:unsigned": "npm run product:sync && electron-builder --win nsis --publish never",
+    "release:windows:production": "npm run product:sync && node scripts/build-windows-production.js",
     "release:key:generate": "node scripts/generate-release-signing-key.js",
     "release:manifest:sign": "node scripts/sign-release-manifest.js",
     "release:client": "node scripts/publish-client-release.js",
@@ -22,7 +24,7 @@
     "mac": "electron-builder --mac"
   },
   "author": "Mocrosoft",
-  "license": "ISC",
+  "license": "GPL-3.0-only",
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",
     "@electron-forge/maker-deb": "^7.8.1",

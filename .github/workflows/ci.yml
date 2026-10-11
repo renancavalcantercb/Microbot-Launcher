@@ -4,25 +4,19 @@ on:
     push:
         branches:
             - main
+    pull_request:
+    workflow_dispatch:
 permissions:
-  contents: write
+    contents: read
 
 jobs:
-    build_windows:
-        uses: ./.github/workflows/build-windows.yml
-
-    build_linux:
-        uses: ./.github/workflows/build-linux.yml
-
-    build_mac:
-        uses: ./.github/workflows/build-mac.yml
-
-    release:
-        needs: [build_windows, build_linux, build_mac]
-        uses: ./.github/workflows/create-release.yml
-        secrets: inherit # Pass secrets to the reusable workflow
-
-    upload:
-        needs: release
-        uses: ./.github/workflows/upload-hetzner.yml
-        secrets: inherit # Pass secrets to the reusable workflow
+    test:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+            - run: npm ci
+            - run: npm test

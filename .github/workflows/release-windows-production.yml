@@ -1,0 +1,50 @@
+name: Build signed Windows production launcher
+
+on:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        runs-on: windows-latest
+        environment: production
+        env:
+            MICROBOT_CUT_WINDOWS_SIGNING_MODE: ${{ vars.WINDOWS_SIGNING_MODE }}
+            MICROBOT_CUT_WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
+            WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+            WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+            MICROBOT_CUT_AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+            MICROBOT_CUT_AZURE_CERTIFICATE_PROFILE: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+            MICROBOT_CUT_AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+            AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+            AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+            AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+            - run: npm ci
+            - run: npm test
+            - run: npm run release:windows:production
+
+            - name: Create corresponding source archive
+              shell: pwsh
+              run: |
+                  $version = (Get-Content package.json | ConvertFrom-Json).version
+                  git archive --format=zip --output="dist-production/Microbot-Cut-Launcher-$version-source.zip" HEAD
+
+            - name: Upload signed installer and corresponding source
+              uses: actions/upload-artifact@v4
+              with:
+                  name: microbot-cut-launcher-windows-production
+                  if-no-files-found: error
+                  path: |
+                      dist-production/*.exe
+                      dist-production/*.blockmap
+                      dist-production/*.yml
+                      dist-production/*-source.zip
