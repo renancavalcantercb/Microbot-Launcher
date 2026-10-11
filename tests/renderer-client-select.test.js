@@ -87,7 +87,13 @@ describe('renderer client version select', () => {
             showConfirmationDialog: jest.fn().mockResolvedValue(true),
             clientExists: (version) => handlers['client-exists']({}, version),
             downloadClient: jest.fn().mockResolvedValue({ error: 'offline' }),
-            errorAlert: jest.fn()
+            errorAlert: jest.fn(),
+            clientRelease: {
+                status: jest.fn().mockResolvedValue({
+                    channel: 'staging',
+                    releases: []
+                })
+            }
         };
         dialog = electron.showConfirmationDialog;
         context = vm.createContext({
@@ -187,6 +193,22 @@ describe('renderer client version select', () => {
         expect(context.window.electron.errorAlert).toHaveBeenCalledWith(
             'Your stable release cohort cannot access the staging channel'
         );
+        expect(dialog).not.toHaveBeenCalled();
+    });
+
+    test('switches a managed staging selection to the authorized production release', async () => {
+        fs.writeFileSync(path.join(microbotDir, 'microbot-cut-2.6.30.jar'), 'production');
+        await context.__renderer.populateAndSelectClientVersion('2.6.28-dev');
+        context.window.electron.fetchClientVersion = async () => 'cut-2.6.30';
+        context.window.electron.clientRelease.status.mockResolvedValue({
+            channel: 'production',
+            releases: [{ version: '2.6.28-dev', channel: 'staging' }]
+        });
+        context.window.electron.clientExists = async (version) => version === 'cut-2.6.30';
+
+        await expect(context.__renderer.checkForOutdatedLaunch()).resolves.toBe(true);
+
+        expect(select.value).toBe('microbot-cut-2.6.30.jar');
         expect(dialog).not.toHaveBeenCalled();
     });
 });

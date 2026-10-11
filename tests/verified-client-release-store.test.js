@@ -79,6 +79,8 @@ describe('verified client release store', () => {
         const status = store.status();
 
         expect(status.lastKnownGoodVersion).toBe(entry.version);
+        expect(store.status('staging').lastKnownGoodVersion).toBe(entry.version);
+        expect(store.status('production').lastKnownGoodVersion).toBeNull();
         expect(status.releases[0]).toMatchObject({
             version: entry.version,
             channel: 'staging',
@@ -87,6 +89,24 @@ describe('verified client release store', () => {
         });
         expect(status.releases[0].signedEnvelope).toBeUndefined();
         expect(status.releases[0].sha256).toBeUndefined();
+    });
+
+    test('keeps last-known-good releases isolated by channel', () => {
+        const stagingBytes = Buffer.from('staging-client');
+        const productionBytes = Buffer.from('production-client');
+        store.record(metadata(stagingBytes));
+        store.markHealthy('cut-2.6.30-p15');
+        store.record({
+            ...metadata(productionBytes),
+            version: 'cut-2.6.30',
+            fileName: 'microbot-cut-2.6.30.jar',
+            channel: 'production',
+            artifactPath: 'releases/artifacts/client/cut-2.6.30/client.jar'
+        });
+        store.markHealthy('cut-2.6.30');
+
+        expect(store.status('staging').lastKnownGoodVersion).toBe('cut-2.6.30-p15');
+        expect(store.status('production').lastKnownGoodVersion).toBe('cut-2.6.30');
     });
 
     test('recovers from the previous atomic store file', () => {

@@ -35,7 +35,8 @@ foreach ($name in @(
     'MICROBOT_CUT_RELEASE_MANIFEST_URL',
     'MICROBOT_CUT_RELEASE_ARTIFACT_BASE_URL',
     'MICROBOT_CUT_RELEASE_PUBLIC_KEY',
-    'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID'
+    'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID',
+    'MICROBOT_CUT_RELEASE_CHANNELS'
 )) {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
 }
@@ -44,33 +45,48 @@ if (Test-Path -LiteralPath $ReleaseConfigPath) {
     $resolvedReleaseConfig = (Resolve-Path -LiteralPath $ReleaseConfigPath).Path
     $release = Get-Content -Raw -LiteralPath $resolvedReleaseConfig | ConvertFrom-Json
     if ($release.enabled -eq $true) {
-        foreach ($property in @('channel', 'manifestUrl', 'artifactBaseUrl', 'publicKeyFile')) {
+        foreach ($property in @('defaultChannel', 'channels')) {
             if ([string]::IsNullOrWhiteSpace([string]$release.$property)) {
                 throw "Staging release config is missing: $property"
             }
         }
-        if ($release.channel -ne 'staging') {
-            throw 'The development launcher may only use the staging release channel.'
+        if ($release.defaultChannel -ne 'staging') {
+            throw 'The development launcher must default to the staging release channel.'
         }
-        foreach ($urlValue in @($release.manifestUrl, $release.artifactBaseUrl)) {
-            $uri = [Uri]$urlValue
-            if ($uri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($uri.UserInfo)) {
-                throw "Staging release URL must use HTTPS without credentials: $urlValue"
+        $channelSettings = [ordered]@{}
+        foreach ($channel in @('staging', 'production')) {
+            $channelConfig = $release.channels.$channel
+            if ($null -eq $channelConfig) {
+                throw "Release config is missing channel: $channel"
             }
-        }
-        $publicMetadataPath = Join-Path (Split-Path $resolvedReleaseConfig) $release.publicKeyFile
-        $publicMetadata = Get-Content -Raw -LiteralPath $publicMetadataPath | ConvertFrom-Json
-        foreach ($property in @('keyId', 'publicKey')) {
-            if ([string]::IsNullOrWhiteSpace([string]$publicMetadata.$property)) {
-                throw "Staging release public key metadata is missing: $property"
+            foreach ($property in @('manifestUrl', 'artifactBaseUrl', 'publicKeyFile')) {
+                if ([string]::IsNullOrWhiteSpace([string]$channelConfig.$property)) {
+                    throw "Release channel $channel is missing: $property"
+                }
+            }
+            foreach ($urlValue in @($channelConfig.manifestUrl, $channelConfig.artifactBaseUrl)) {
+                $uri = [Uri]$urlValue
+                if ($uri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($uri.UserInfo)) {
+                    throw "Release URL must use HTTPS without credentials: $urlValue"
+                }
+            }
+            $publicMetadataPath = Join-Path (Split-Path $resolvedReleaseConfig) $channelConfig.publicKeyFile
+            $publicMetadata = Get-Content -Raw -LiteralPath $publicMetadataPath | ConvertFrom-Json
+            foreach ($property in @('keyId', 'publicKey')) {
+                if ([string]::IsNullOrWhiteSpace([string]$publicMetadata.$property)) {
+                    throw "Release channel $channel public key metadata is missing: $property"
+                }
+            }
+            $channelSettings[$channel] = [ordered]@{
+                manifestUrl = $channelConfig.manifestUrl
+                artifactBaseUrl = $channelConfig.artifactBaseUrl
+                publicKey = $publicMetadata.publicKey
+                publicKeyId = $publicMetadata.keyId
             }
         }
         $env:MICROBOT_CUT_RELEASE_UPDATES_ENABLED = 'true'
-        $env:MICROBOT_CUT_RELEASE_CHANNEL = $release.channel
-        $env:MICROBOT_CUT_RELEASE_MANIFEST_URL = $release.manifestUrl
-        $env:MICROBOT_CUT_RELEASE_ARTIFACT_BASE_URL = $release.artifactBaseUrl
-        $env:MICROBOT_CUT_RELEASE_PUBLIC_KEY = $publicMetadata.publicKey
-        $env:MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID = $publicMetadata.keyId
+        $env:MICROBOT_CUT_RELEASE_CHANNEL = $release.defaultChannel
+        $env:MICROBOT_CUT_RELEASE_CHANNELS = $channelSettings | ConvertTo-Json -Compress -Depth 4
     }
 }
 

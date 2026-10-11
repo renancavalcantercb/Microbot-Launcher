@@ -61,6 +61,7 @@ describe('client release health and rollback', () => {
 
         expect(store.get('cut-old').health).toBe('healthy');
         expect(store.read().lastKnownGoodVersion).toBe('cut-old');
+        expect(store.read().lastKnownGoodByChannel.staging).toBe('cut-old');
         expect(onChanged).toHaveBeenLastCalledWith(
             expect.objectContaining({ lastKnownGoodVersion: 'cut-old' })
         );
@@ -84,5 +85,32 @@ describe('client release health and rollback', () => {
             version_pref: 'cut-old',
             client_ram: '4g'
         });
+    });
+
+    test('does not roll a failed staging release back to production', () => {
+        record('cut-old');
+        health.begin('cut-old');
+        health.healthy('cut-old');
+        const productionBytes = Buffer.from('cut-production');
+        store.record({
+            version: 'cut-production',
+            fileName: 'microbot-cut-production.jar',
+            channel: 'production',
+            sequence: 1,
+            size: productionBytes.length,
+            sha256: crypto.createHash('sha256').update(productionBytes).digest('hex'),
+            artifactPath: 'releases/artifacts/client/cut-production/client.jar',
+            signedEnvelope: { test: 'cut-production' }
+        });
+        store.markHealthy('cut-production');
+        record('cut-new');
+        health.begin('cut-new');
+
+        jest.advanceTimersByTime(1001);
+
+        expect(JSON.parse(fs.readFileSync(
+            path.join(directory, 'resource_versions.json'),
+            'utf8'
+        )).client).toBe('cut-old');
     });
 });

@@ -1,0 +1,14 @@
+{
+  "channel": "production",
+  "bucket": "microbot-cut-artifacts-production",
+  "publicBaseUrl": "https://cut.xulixnacc.online/api/v1/",
+  "manifestUrl": "https://cut.xulixnacc.online/api/v1/releases/production/manifest",
+  "keyId": "release-production-2026-01",
+  "privateKeyFile": "../.secrets/release-production-2026-01.pem",
+  "publicKeyFile": "release-production-2026-01.public.json",
+  "minimumLauncherVersion": "3.2.10",
+  "clientRepository": "../../Microbot",
+  "backendRepository": "../../microbot-cut-backend",
+  "gradleUserHome": "../../.gradle-final",
+  "sourceJar": "../../Microbot/runelite-client/build/libs/microbot-2.6.30.jar"
+}

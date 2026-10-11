@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 
 const {
-    buildReleaseUpdateSettings
+    buildReleaseUpdateSettings,
+    settingsForChannel
 } = require('../libs/release-update-settings');
 
 function publicKey() {
@@ -65,6 +66,69 @@ describe('release update settings', () => {
                 log
             })
         ).toEqual({ enabled: false });
+        expect(log.error).toHaveBeenCalled();
+    });
+
+    test('accepts independent trusted settings for production and staging', () => {
+        const stagingKey = publicKey();
+        const productionKey = publicKey();
+        const settings = buildReleaseUpdateSettings({
+            environment: {
+                MICROBOT_CUT_RELEASE_UPDATES_ENABLED: 'true',
+                MICROBOT_CUT_RELEASE_CHANNEL: 'staging',
+                MICROBOT_CUT_RELEASE_CHANNELS: JSON.stringify({
+                    staging: {
+                        manifestUrl: 'https://cut-staging.example/api/v1/releases/staging/manifest',
+                        artifactBaseUrl: 'https://cut-staging.example/api/v1/',
+                        publicKey: stagingKey,
+                        publicKeyId: 'release-staging-2026'
+                    },
+                    production: {
+                        manifestUrl: 'https://cut.example/api/v1/releases/production/manifest',
+                        artifactBaseUrl: 'https://cut.example/api/v1/',
+                        publicKey: productionKey,
+                        publicKeyId: 'release-production-2026'
+                    }
+                })
+            },
+            productConfig: {},
+            allowEnvironmentConfiguration: true
+        });
+
+        expect(settings).toMatchObject({
+            enabled: true,
+            dynamic: true,
+            defaultChannel: 'staging',
+            channel: 'staging'
+        });
+        expect(settingsForChannel(settings, 'production')).toMatchObject({
+            channel: 'production',
+            manifestUrl: 'https://cut.example/api/v1/releases/production/manifest'
+        });
+        expect(settingsForChannel(settings, 'internal')).toBeNull();
+        expect(settings.channels.production.trustedKeys['release-production-2026'])
+            .toBe(productionKey);
+    });
+
+    test('fails closed when the default multichannel release is absent', () => {
+        const log = { error: jest.fn() };
+        expect(buildReleaseUpdateSettings({
+            environment: {
+                MICROBOT_CUT_RELEASE_UPDATES_ENABLED: 'true',
+                MICROBOT_CUT_RELEASE_CHANNEL: 'production',
+                MICROBOT_CUT_RELEASE_CHANNELS: JSON.stringify({
+                    staging: {
+                        manifestUrl: 'https://cut-staging.example/manifest',
+                        artifactBaseUrl: 'https://cut-staging.example/',
+                        publicKey: publicKey(),
+                        publicKeyId: 'release-staging-2026'
+                    }
+                })
+            },
+            productConfig: {},
+            allowEnvironmentConfiguration: true,
+            log
+        })).toEqual({ enabled: false });
         expect(log.error).toHaveBeenCalled();
     });
 });

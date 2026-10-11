@@ -24,7 +24,8 @@ const productConfig = Object.freeze({
         manifestUrl: 'MICROBOT_CUT_RELEASE_MANIFEST_URL',
         artifactBaseUrl: 'MICROBOT_CUT_RELEASE_ARTIFACT_BASE_URL',
         publicKey: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY',
-        publicKeyId: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID'
+        publicKeyId: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID',
+        channels: 'MICROBOT_CUT_RELEASE_CHANNELS'
     }),
     pluginDevelopmentEnvironmentVariable: 'MICROBOT_CUT_PLUGIN_DEV',
     pluginRepositoryEnvironmentVariables: Object.freeze({

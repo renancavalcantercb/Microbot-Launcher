@@ -416,6 +416,96 @@ describe('client jar cleanup and listing with an isolated home', () => {
             });
         });
 
+        test('selects the signed release channel returned by the server cohort', async () => {
+            const releaseHandlers = {};
+            const signing = require('../libs/release-manifest-signing');
+            const channels = {};
+            const envelopes = {};
+            for (const channel of ['staging', 'production']) {
+                const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+                const keyId = `release-${channel}-test`;
+                const version = channel === 'staging'
+                    ? 'cut-2.6.31-p1'
+                    : 'cut-2.6.30';
+                channels[channel] = {
+                    manifestUrl: `https://cut-${channel}.example/api/v1/releases/${channel}/manifest`,
+                    artifactBaseUrl: `https://cut-${channel}.example/api/v1/`,
+                    publicKey: keys.publicKey
+                        .export({ type: 'spki', format: 'der' })
+                        .toString('base64'),
+                    publicKeyId: keyId
+                };
+                envelopes[channel] = signing.signReleaseManifest({
+                    schemaVersion: 1,
+                    channel,
+                    sequence: 1,
+                    publishedAt: '2026-10-11T00:00:00.000Z',
+                    launcher: null,
+                    client: {
+                        version,
+                        minimumLauncherVersion: '3.2.10',
+                        artifactPath: `releases/artifacts/client/${version}/client.jar`,
+                        size: 10,
+                        sha256: 'a'.repeat(64)
+                    }
+                }, {
+                    keyId,
+                    privateKeyPem: keys.privateKey.export({ type: 'pkcs8', format: 'pem' })
+                });
+            }
+            const releaseAxios = { get: jest.fn(async (url) => ({
+                data: url.includes('/production/')
+                    ? envelopes.production
+                    : envelopes.staging
+            })) };
+            let access = {
+                authenticated: true,
+                releaseCohort: 'stable',
+                allowedReleaseChannels: ['production'],
+                selectedReleaseChannel: 'production'
+            };
+            const ipcHandlers = require('../libs/ipc-handlers.js');
+            await ipcHandlers({
+                ipcMain: { handle: (channel, fn) => (releaseHandlers[channel] = fn) },
+                axios: releaseAxios,
+                microbotDir,
+                productDataDir: microbotDir,
+                packageJson: { version: '3.2.10' },
+                path,
+                log: { info: jest.fn(), error: jest.fn() },
+                dialog: {},
+                fs,
+                projectDir: path.join(__dirname, '..'),
+                app: {},
+                environment: {},
+                releaseAccessStatus: async () => access,
+                productConfig: {
+                    ...require('../product-config'),
+                    releaseUpdates: {
+                        enabled: true,
+                        defaultChannel: 'staging',
+                        channels
+                    }
+                }
+            });
+
+            await expect(releaseHandlers['fetch-client-version']()).resolves.toBe('cut-2.6.30');
+            expect(await releaseHandlers['client-release:status']()).toMatchObject({
+                channel: 'production'
+            });
+
+            access = {
+                authenticated: true,
+                releaseCohort: 'beta',
+                allowedReleaseChannels: ['production', 'staging'],
+                selectedReleaseChannel: 'staging'
+            };
+            await expect(releaseHandlers['fetch-client-version']()).resolves.toBe('cut-2.6.31-p1');
+            expect(await releaseHandlers['client-release:status']()).toMatchObject({
+                channel: 'staging'
+            });
+        });
+
         test('uses local versions and disables downloads without product endpoints', async () => {
             const offlineHandlers = {};
             const offlineAxios = jest.fn();

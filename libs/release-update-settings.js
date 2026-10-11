@@ -6,7 +6,8 @@ const DEFAULT_ENVIRONMENT_VARIABLES = Object.freeze({
     manifestUrl: 'MICROBOT_CUT_RELEASE_MANIFEST_URL',
     artifactBaseUrl: 'MICROBOT_CUT_RELEASE_ARTIFACT_BASE_URL',
     publicKey: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY',
-    publicKeyId: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID'
+    publicKeyId: 'MICROBOT_CUT_RELEASE_PUBLIC_KEY_ID',
+    channels: 'MICROBOT_CUT_RELEASE_CHANNELS'
 });
 
 function httpsUrl(value, label) {
@@ -40,7 +41,7 @@ function rsaPublicKey(value) {
     return normalized;
 }
 
-function validateSettings(input) {
+function validateChannelSettings(input) {
     if (!['staging', 'production'].includes(input.channel)) {
         throw new Error('release channel must be staging or production');
     }
@@ -56,6 +57,40 @@ function validateSettings(input) {
             [input.publicKeyId]: rsaPublicKey(input.publicKey)
         })
     });
+}
+
+function validateSettings(input) {
+    if (!input.channels) return validateChannelSettings(input);
+    if (!input.channels || typeof input.channels !== 'object' || Array.isArray(input.channels)) {
+        throw new Error('release channels must be an object');
+    }
+    const channels = {};
+    for (const [channel, value] of Object.entries(input.channels)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            throw new Error(`release channel ${channel} is invalid`);
+        }
+        if (value.channel && value.channel !== channel) {
+            throw new Error(`release channel ${channel} does not match its configuration`);
+        }
+        channels[channel] = validateChannelSettings({ ...value, channel });
+    }
+    const defaultChannel = input.defaultChannel || input.channel;
+    if (!channels[defaultChannel]) {
+        throw new Error('default release channel is not configured');
+    }
+    const selected = channels[defaultChannel];
+    return Object.freeze({
+        ...selected,
+        defaultChannel,
+        dynamic: true,
+        channels: Object.freeze(channels)
+    });
+}
+
+function settingsForChannel(settings, channel) {
+    if (!settings?.enabled) return null;
+    if (!settings.dynamic) return settings.channel === channel ? settings : null;
+    return settings.channels[channel] || null;
 }
 
 function buildReleaseUpdateSettings({
@@ -83,6 +118,13 @@ function buildReleaseUpdateSettings({
         return Object.freeze({ enabled: false });
     }
     try {
+        const serializedChannels = environment[names.channels];
+        if (serializedChannels) {
+            return validateSettings({
+                defaultChannel: environment[names.channel],
+                channels: JSON.parse(serializedChannels)
+            });
+        }
         return validateSettings({
             channel: environment[names.channel],
             manifestUrl: environment[names.manifestUrl],
@@ -98,5 +140,6 @@ function buildReleaseUpdateSettings({
 
 module.exports = {
     DEFAULT_ENVIRONMENT_VARIABLES,
-    buildReleaseUpdateSettings
+    buildReleaseUpdateSettings,
+    settingsForChannel
 };

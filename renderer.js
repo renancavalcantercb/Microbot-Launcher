@@ -2148,6 +2148,22 @@ async function checkForOutdatedLaunch() {
     const selectedJar = (await orderClientJarsByVersion()).find(
         (jar) => jar.file === selectedFile
     );
+    const releaseStatus = await window.electron.clientRelease?.status?.();
+    const selectedManagedRelease = releaseStatus?.releases?.find(
+        (release) => release.version === selectedVersion
+    );
+    if (
+        selectedManagedRelease?.channel &&
+        releaseStatus?.channel &&
+        selectedManagedRelease.channel !== releaseStatus.channel
+    ) {
+        window.electron.logError(
+            `Switching from ${selectedManagedRelease.channel} client ${selectedVersion} ` +
+            `to the authorized ${releaseStatus.channel} release ${latestVersion}.`
+        );
+        const result = await downloadClientIfNotExist(latestVersion);
+        return result.exists;
+    }
     if (selectedJar?.kind === 'custom') {
         window.electron.logError(
             `Launching custom client ${selectedVersion}; latest product release is ${latestVersion}`

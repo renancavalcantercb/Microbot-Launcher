@@ -23,7 +23,7 @@ module.exports = async function (deps) {
         require(path.join(projectDir, 'product-config.js'));
     const url = productConfig.updateApiBase;
     const filestorage = productConfig.updateFilesBase;
-    const { buildReleaseUpdateSettings } = require(path.join(
+    const { buildReleaseUpdateSettings, settingsForChannel } = require(path.join(
         projectDir,
         'libs',
         'release-update-settings.js'
@@ -51,12 +51,21 @@ module.exports = async function (deps) {
             (deps.environment || process.env).DEBUG === 'true',
         log
     });
-    const releaseManifestService = new ReleaseManifestService({
-        axios,
-        productDataDir: productDataDir || microbotDir,
-        settings: releaseUpdateSettings,
-        log
-    });
+    const releaseManifestServices = new Map();
+    function releaseManifestServiceFor(channel) {
+        const settings = settingsForChannel(releaseUpdateSettings, channel);
+        if (!settings) throw new Error(`${channel} release channel is not configured`);
+        if (!releaseManifestServices.has(channel)) {
+            releaseManifestServices.set(channel, new ReleaseManifestService({
+                axios,
+                productDataDir: productDataDir || microbotDir,
+                settings,
+                log
+            }));
+        }
+        return releaseManifestServices.get(channel);
+    }
+    let activeReleaseChannel = releaseUpdateSettings.channel || null;
     const verifiedClientReleaseStore = new VerifiedClientReleaseStore({
         fs,
         productDataDir: productDataDir || microbotDir,
@@ -78,9 +87,9 @@ module.exports = async function (deps) {
     function clientReleaseStatus() {
         return {
             enabled: releaseUpdateSettings.enabled,
-            channel: releaseUpdateSettings.channel || null,
+            channel: activeReleaseChannel,
             selectedVersion: selectedClientVersion(),
-            ...verifiedClientReleaseStore.status()
+            ...verifiedClientReleaseStore.status(activeReleaseChannel)
         };
     }
 
@@ -106,7 +115,9 @@ module.exports = async function (deps) {
     });
     if (releaseUpdateSettings.enabled) {
         log.info(
-            `Signed product updates enabled on ${releaseUpdateSettings.channel} channel.`
+            releaseUpdateSettings.dynamic
+                ? `Signed product updates enabled for ${Object.keys(releaseUpdateSettings.channels).join(', ')} channels.`
+                : `Signed product updates enabled on ${releaseUpdateSettings.channel} channel.`
         );
     }
     const { DataDirectoryImporter } = require(path.join(
@@ -218,12 +229,42 @@ module.exports = async function (deps) {
         return { success: true };
     });
     async function authorizeConfiguredReleaseChannel() {
-        if (!releaseUpdateSettings.enabled) return;
-		if (typeof deps.authorizeReleaseChannel === 'function') {
-			await deps.authorizeReleaseChannel(releaseUpdateSettings.channel);
-			return;
-		}
-        await productSessionService.authorizeReleaseChannel(releaseUpdateSettings.channel);
+        if (!releaseUpdateSettings.enabled) return null;
+        let channel = releaseUpdateSettings.channel;
+        let access;
+        if (releaseUpdateSettings.dynamic) {
+            access = typeof deps.releaseAccessStatus === 'function'
+                ? await deps.releaseAccessStatus()
+                : await productSessionService.status();
+            if (!access?.authenticated) {
+                throw new Error(
+                    access?.error || 'Connect your Microbot Cut account to access product releases'
+                );
+            }
+            if (!Array.isArray(access.allowedReleaseChannels)) {
+                throw new Error('The authentication service did not provide release channel access');
+            }
+            channel = access.selectedReleaseChannel;
+            if (typeof channel !== 'string' || !channel) {
+                throw new Error('The authentication service did not select a release channel');
+            }
+            if (!access.allowedReleaseChannels.includes(channel)) {
+                throw new Error(`The selected ${channel} release channel is not authorized`);
+            }
+        } else if (typeof deps.authorizeReleaseChannel === 'function') {
+            access = await deps.authorizeReleaseChannel(channel);
+        } else {
+            access = await productSessionService.authorizeReleaseChannel(channel);
+        }
+        const settings = settingsForChannel(releaseUpdateSettings, channel);
+        if (!settings) throw new Error(`${channel} release channel is not configured`);
+        activeReleaseChannel = channel;
+        return {
+            channel,
+            settings,
+            manifestService: releaseManifestServiceFor(channel),
+            access
+        };
     }
     ipcMain.handle('client-release:status', async () => clientReleaseStatus());
     ipcMain.handle('client-release:rollback', async () => {
@@ -231,9 +272,9 @@ module.exports = async function (deps) {
             if (!releaseUpdateSettings.enabled) {
                 return { error: 'Signed product updates are not enabled' };
             }
-            await authorizeConfiguredReleaseChannel();
+            const context = await authorizeConfiguredReleaseChannel();
             const state = verifiedClientReleaseStore.read();
-            const version = state.lastKnownGoodVersion;
+            const version = verifiedClientReleaseStore.status(context.channel).lastKnownGoodVersion;
             const entry = version ? state.releases[version] : null;
             if (!entry || entry.health !== 'healthy') {
                 return { error: 'No healthy client release is available for rollback' };
@@ -278,7 +319,7 @@ module.exports = async function (deps) {
         return { error: message };
     }
 
-    function signedClientEntry(release, filePath) {
+    function signedClientEntry(release, filePath, manifestService) {
         return {
             version: release.client.version,
             fileName: path.basename(filePath),
@@ -287,7 +328,7 @@ module.exports = async function (deps) {
             size: release.client.size,
             sha256: release.client.sha256,
             artifactPath: release.client.artifactPath,
-            signedEnvelope: releaseManifestService.getLocallyAcceptedEnvelope()
+            signedEnvelope: manifestService.getLocallyAcceptedEnvelope()
         };
     }
 
@@ -295,7 +336,8 @@ module.exports = async function (deps) {
         if (!entry?.signedEnvelope) {
             throw new Error(`client ${entry?.version || 'release'} has no signed local metadata`);
         }
-        const release = releaseManifestService.verifyEnvelope(entry.signedEnvelope);
+        const release = releaseManifestServiceFor(entry.channel)
+            .verifyEnvelope(entry.signedEnvelope);
         const client = release.client;
         if (
             release.channel !== entry.channel ||
@@ -309,28 +351,34 @@ module.exports = async function (deps) {
         }
     }
 
-    async function verifyClientBeforeLaunch(version) {
+    async function verifyClientBeforeLaunch(version, context) {
         if (!releaseUpdateSettings.enabled) return { legacy: true };
         const filePath = path.join(microbotDir, `microbot-${version}.jar`);
         const registered = verifiedClientReleaseStore.get(version);
         if (registered) {
+            if (registered.channel !== context.channel) {
+                throw new Error(
+                    `Client ${version} belongs to the ${registered.channel} channel; ` +
+                    `your account currently uses ${context.channel}`
+                );
+            }
             assertRegisteredReleaseIsSigned(registered);
             await verifiedClientReleaseStore.verifyFile(registered, filePath);
             log.info(`Verified local client release ${version} before launch.`);
             return { verified: true, release: registered };
         }
 
-        let release = releaseManifestService.getLocallyAccepted();
+        let release = context.manifestService.getLocallyAccepted();
         if (!release || release.client.version !== version) {
             try {
-                release = await releaseManifestService.fetchCurrent();
+                release = await context.manifestService.fetchCurrent();
             } catch (error) {
                 log.warn?.(`Unable to identify ${version} as a signed release: ${error.message}`);
                 release = null;
             }
         }
         if (release?.client?.version === version) {
-            const entry = signedClientEntry(release, filePath);
+            const entry = signedClientEntry(release, filePath, context.manifestService);
             await verifiedClientReleaseStore.verifyFile(entry, filePath);
             verifiedClientReleaseStore.record(entry);
             log.info(`Enrolled and verified local client release ${version} before launch.`);
@@ -395,8 +443,8 @@ module.exports = async function (deps) {
                                       return invalidVersionResult(version);
                                   }
                                   try {
-                                      await authorizeConfiguredReleaseChannel();
-                                      await verifyClientBeforeLaunch(version);
+                                      const context = await authorizeConfiguredReleaseChannel();
+                                      await verifyClientBeforeLaunch(version, context);
                                   } catch (error) {
                                       log.error(`Client launch integrity check failed: ${error.message}`);
                                       return { error: error.message };
@@ -413,7 +461,20 @@ module.exports = async function (deps) {
     await jarExecutorHandler({
         ...accountDeps,
         ipcMain: versionCheckedIpcMain,
-        clientReleaseHealth
+        clientReleaseHealth,
+        productVmArgsForLaunch: ({ configuredArgs }) => {
+            if (
+                releaseUpdateSettings.dynamic &&
+                activeReleaseChannel !== releaseUpdateSettings.defaultChannel
+            ) {
+                log.info(
+                    `Product plugin repository is disabled on ${activeReleaseChannel} ` +
+                    'until a channel-specific signed catalog is configured.'
+                );
+                return ['-Dmicrobot.plugins.repository.enabled=false'];
+            }
+            return configuredArgs;
+        }
     });
     const packageVersion = packageJson.version;
 
@@ -476,11 +537,11 @@ module.exports = async function (deps) {
         try {
             const filePath = path.join(microbotDir, `microbot-${version}.jar`);
             if (releaseUpdateSettings.enabled) {
-                await authorizeConfiguredReleaseChannel();
-                const release = await releaseManifestService.fetchCurrent();
+                const context = await authorizeConfiguredReleaseChannel();
+                const release = await context.manifestService.fetchCurrent();
                 if (release.client.version !== version) {
                     return {
-                        error: `Client version ${version} is not the current signed ${releaseUpdateSettings.channel} release`
+                        error: `Client version ${version} is not the current signed ${context.channel} release`
                     };
                 }
                 event.sender.send('progress', {
@@ -490,7 +551,7 @@ module.exports = async function (deps) {
                 let lastReportedDownloadPercent = -1;
                 const result = await downloadVerifiedArtifact({
                     httpClient: axios,
-                    url: releaseManifestService.resolveArtifactUrl(
+                    url: context.manifestService.resolveArtifactUrl(
                         release.client.artifactPath
                     ),
                     destination: filePath,
@@ -517,7 +578,7 @@ module.exports = async function (deps) {
                     }
                 }
                 verifiedClientReleaseStore.record(
-                    signedClientEntry(release, filePath)
+                    signedClientEntry(release, filePath, context.manifestService)
                 );
                 event.sender.send('progress', {
                     percent: 100,
@@ -596,8 +657,8 @@ module.exports = async function (deps) {
     ipcMain.handle('fetch-launcher-version', async () => {
         if (releaseUpdateSettings.enabled) {
             try {
-                await authorizeConfiguredReleaseChannel();
-                const launcher = (await releaseManifestService.fetchCurrent()).launcher;
+                const context = await authorizeConfiguredReleaseChannel();
+                const launcher = (await context.manifestService.fetchCurrent()).launcher;
                 return launcher ? launcher.version : packageJson.version;
             } catch (error) {
                 log.error(`Error fetching signed launcher version: ${error.message}`);
@@ -619,8 +680,8 @@ module.exports = async function (deps) {
     ipcMain.handle('fetch-client-version', async () => {
         if (releaseUpdateSettings.enabled) {
             try {
-                await authorizeConfiguredReleaseChannel();
-                return (await releaseManifestService.fetchCurrent()).client.version;
+                const context = await authorizeConfiguredReleaseChannel();
+                return (await context.manifestService.fetchCurrent()).client.version;
             } catch (error) {
                 log.error(`Error fetching signed client version: ${error.message}`);
                 return { error: error.message };
@@ -647,19 +708,25 @@ module.exports = async function (deps) {
             log.info(filePath);
             if (!fs.existsSync(filePath)) return false;
             if (!releaseUpdateSettings.enabled) return true;
-			await authorizeConfiguredReleaseChannel();
+			const context = await authorizeConfiguredReleaseChannel();
 
             const registered = verifiedClientReleaseStore.get(version);
             if (registered) {
+                if (registered.channel !== context.channel) {
+                    throw new Error(
+                        `Client ${version} belongs to the ${registered.channel} channel; ` +
+                        `your account currently uses ${context.channel}`
+                    );
+                }
                 assertRegisteredReleaseIsSigned(registered);
                 await verifiedClientReleaseStore.verifyFile(registered, filePath);
                 return true;
             }
             const release =
-                releaseManifestService.getLocallyAccepted() ||
-                (await releaseManifestService.fetchCurrent());
+                context.manifestService.getLocallyAccepted() ||
+                (await context.manifestService.fetchCurrent());
             if (release.client.version !== version) return true;
-            const entry = signedClientEntry(release, filePath);
+            const entry = signedClientEntry(release, filePath, context.manifestService);
             await verifiedClientReleaseStore.verifyFile(entry, filePath);
             verifiedClientReleaseStore.record(entry);
             return true;

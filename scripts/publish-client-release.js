@@ -25,7 +25,8 @@ function usage() {
         '  node scripts/publish-client-release.js promote --version <version> --sequence <n> --confirm-promote',
         '  node scripts/publish-client-release.js verify --version <version> --sequence <n>',
         '',
-        'All commands default to config/release-publication.staging.json.'
+        'All commands default to config/release-publication.staging.json.',
+        'Use --config config/release-publication.production.json for production.'
     ].join('\n');
 }
 

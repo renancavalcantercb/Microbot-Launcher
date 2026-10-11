@@ -1,7 +1,16 @@
 {
   "enabled": true,
-  "channel": "staging",
-  "manifestUrl": "https://cut-staging.xulixnacc.online/api/v1/releases/staging/manifest",
-  "artifactBaseUrl": "https://cut-staging.xulixnacc.online/api/v1/",
-  "publicKeyFile": "release-staging-2026-01.public.json"
+  "defaultChannel": "staging",
+  "channels": {
+    "staging": {
+      "manifestUrl": "https://cut-staging.xulixnacc.online/api/v1/releases/staging/manifest",
+      "artifactBaseUrl": "https://cut-staging.xulixnacc.online/api/v1/",
+      "publicKeyFile": "release-staging-2026-01.public.json"
+    },
+    "production": {
+      "manifestUrl": "https://cut.xulixnacc.online/api/v1/releases/production/manifest",
+      "artifactBaseUrl": "https://cut.xulixnacc.online/api/v1/",
+      "publicKeyFile": "release-production-2026-01.public.json"
+    }
+  }
 }

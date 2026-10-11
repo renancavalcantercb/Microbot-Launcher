@@ -37,10 +37,19 @@ module.exports = async function (deps) {
     const pluginRepository = pluginDevelopmentMode
         ? { enabled: false, args: [] }
         : buildPluginRepositoryVmArgs({ productConfig, log });
-    const productVmArgs = pluginDevelopmentMode
+    const configuredProductVmArgs = pluginDevelopmentMode
         ? ['-Dmicrobot.plugins.developmentMode=true']
         : [];
-    productVmArgs.push(...pluginRepository.args);
+    configuredProductVmArgs.push(...pluginRepository.args);
+    async function productVmArgsForLaunch() {
+        if (typeof deps.productVmArgsForLaunch === 'function') {
+            const selected = await deps.productVmArgsForLaunch({
+                configuredArgs: [...configuredProductVmArgs]
+            });
+            if (Array.isArray(selected)) return selected;
+        }
+        return [...configuredProductVmArgs];
+    }
     const clientTicketBroker = deps.clientTicketBroker || new ClientTicketBroker({
         productSessionService,
         log,
@@ -109,6 +118,7 @@ module.exports = async function (deps) {
             try {
                 const jarPath = path.join(microbotDir, `microbot-${version}.jar`);
                 const memoryConfig = selectMemoryArgs(ramPreference);
+                const productVmArgs = await productVmArgsForLaunch();
                 log.info(
                     `Launching client with ${memoryConfig.source} memory settings: ${memoryConfig.args.join(' ')}`
                 );
@@ -179,6 +189,7 @@ module.exports = async function (deps) {
     ipcMain.handle(
         'play-no-jagex-account',
         async (event, version, proxy, ramPreference) => {
+            const productVmArgs = await productVmArgsForLaunch();
             const jarPath = path.join(microbotDir, `microbot-${version}.jar`);
             const memoryConfig = selectMemoryArgs(ramPreference);
             log.info(

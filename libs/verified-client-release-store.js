@@ -73,10 +73,13 @@ class VerifiedClientReleaseStore {
         return this.read().releases[version] || null;
     }
 
-    status() {
+    status(channel = null) {
         const state = this.read();
+        const channelLastKnownGood = channel
+            ? state.lastKnownGoodByChannel?.[channel] || null
+            : state.lastKnownGoodVersion || null;
         return {
-            lastKnownGoodVersion: state.lastKnownGoodVersion || null,
+            lastKnownGoodVersion: channelLastKnownGood,
             releases: Object.values(state.releases)
                 .map((entry) => ({
                     version: entry.version,
@@ -152,6 +155,10 @@ class VerifiedClientReleaseStore {
         this.write({
             ...state,
             lastKnownGoodVersion: version,
+            lastKnownGoodByChannel: {
+                ...(state.lastKnownGoodByChannel || {}),
+                [entry.channel]: version
+            },
             releases: { ...state.releases, [version]: updated }
         });
         return updated;
@@ -161,6 +168,10 @@ class VerifiedClientReleaseStore {
         const state = this.read();
         const entry = state.releases[version];
         if (!entry) return { release: null, rollbackVersion: state.lastKnownGoodVersion || null };
+        const channelLastKnownGood = state.lastKnownGoodByChannel?.[entry.channel] ||
+            (state.releases[state.lastKnownGoodVersion]?.channel === entry.channel
+                ? state.lastKnownGoodVersion
+                : null);
         const updated = {
             ...entry,
             health: 'failed',
@@ -174,8 +185,8 @@ class VerifiedClientReleaseStore {
         return {
             release: updated,
             rollbackVersion:
-                state.lastKnownGoodVersion && state.lastKnownGoodVersion !== version
-                    ? state.lastKnownGoodVersion
+                channelLastKnownGood && channelLastKnownGood !== version
+                    ? channelLastKnownGood
                     : null
         };
     }
