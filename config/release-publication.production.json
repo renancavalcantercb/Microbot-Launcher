@@ -10,5 +10,5 @@
   "clientRepository": "../../Microbot",
   "backendRepository": "../../microbot-cut-backend",
   "gradleUserHome": "../../.gradle-final",
-  "sourceJar": "../../Microbot/runelite-client/build/libs/microbot-2.6.30.jar"
+  "sourceJar": "../../Microbot/runelite-client/build/libs/microbot-2.6.31.jar"
 }

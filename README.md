@@ -17,6 +17,17 @@ acknowledgement, and last-known-good rollback. Run the current staging setup wit
 npm.cmd run dev:staging
 ```
 
+Run the private Cut Walker development build with:
+
+```powershell
+npm.cmd run dev:walker
+```
+
+This installs the locally built `cut-walker-0.1.0.jar` into the isolated
+development plugin directory and disables the remote plugin catalog for that
+launcher process. It still uses product authentication and the signed staging
+client channel.
+
 Run the production account and stable release profile with:
 
 ```powershell
@@ -30,10 +41,12 @@ catalog signature, public artifact hash, Worker catalog, and premium access
 control validation. Premium installation, verified-cache loading, entitlement
 revocation, and automatic runtime shutdown also passed in production.
 
-The current staging client is `cut-2.6.30-p17`, signed release sequence 3. It
-has passed verified download, startup acknowledgement, and last-known-good
-persistence. Release commands are defined by `npm.cmd run release:client` and
-must follow prepare, immutable stage, explicit promote, and verify.
+The current staging client is `cut-2.6.31-p2`, signed release sequence 5. Its
+manifest and public artifact have passed publication verification. Startup
+acknowledgement and last-known-good persistence remain part of the private
+walker acceptance run. Release commands are defined by
+`npm.cmd run release:client` and must follow prepare, immutable stage, explicit
+promote, and verify.
 
 Staging is currently an operator-selected environment. Server-controlled
 stable/beta/internal cohorts are now returned by the backend. Signed staging

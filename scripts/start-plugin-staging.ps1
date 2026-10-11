@@ -1,6 +1,8 @@
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot '..\config\plugin-repository.staging.json'),
-    [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.staging.json')
+    [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.staging.json'),
+    [switch]$PluginDevelopment,
+    [string]$PluginJar = (Join-Path $PSScriptRoot '..\..\microbot-cut-plugins\plugins\cut-walker\build\libs\cut-walker-0.1.0.jar')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,13 +23,35 @@ foreach ($urlValue in @($repository.productApiBaseUrl, $repository.manifestUrl, 
     }
 }
 
-Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV -ErrorAction SilentlyContinue
 $env:MICROBOT_CUT_API_BASE_URL = $repository.productApiBaseUrl
-$env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true'
-$env:MICROBOT_CUT_PLUGIN_MANIFEST_URL = $repository.manifestUrl
-$env:MICROBOT_CUT_PLUGIN_RELEASES_URL = $repository.releasesUrl
-$env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY = $repository.publicKey
-$env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID = $repository.publicKeyId
+
+if ($PluginDevelopment) {
+    $resolvedPluginJar = (Resolve-Path -LiteralPath $PluginJar).Path
+    $developmentPluginDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.runelite\microbot-cut-dev-plugins'
+    $developmentPluginJar = Join-Path $developmentPluginDirectory 'CutWalkerPlugin.jar'
+
+    New-Item -ItemType Directory -Force -Path $developmentPluginDirectory | Out-Null
+    Copy-Item -Force -LiteralPath $resolvedPluginJar -Destination $developmentPluginJar
+
+    $env:MICROBOT_CUT_PLUGIN_DEV = 'true'
+    $env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'false'
+    foreach ($name in @(
+        'MICROBOT_CUT_PLUGIN_MANIFEST_URL',
+        'MICROBOT_CUT_PLUGIN_RELEASES_URL',
+        'MICROBOT_CUT_PLUGIN_PUBLIC_KEY',
+        'MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID'
+    )) {
+        Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+    }
+    Write-Host "Installed local Cut Walker development artifact: $developmentPluginJar"
+} else {
+    Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV -ErrorAction SilentlyContinue
+    $env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true'
+    $env:MICROBOT_CUT_PLUGIN_MANIFEST_URL = $repository.manifestUrl
+    $env:MICROBOT_CUT_PLUGIN_RELEASES_URL = $repository.releasesUrl
+    $env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY = $repository.publicKey
+    $env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID = $repository.publicKeyId
+}
 
 foreach ($name in @(
     'MICROBOT_CUT_RELEASE_UPDATES_ENABLED',
