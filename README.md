@@ -41,7 +41,7 @@ catalog signature, public artifact hash, Worker catalog, and premium access
 control validation. Premium installation, verified-cache loading, entitlement
 revocation, and automatic runtime shutdown also passed in production.
 
-The current staging client is `cut-2.6.31-p8`, signed release sequence 11. Its
+The current staging client is `cut-2.6.31-p9`, signed release sequence 12. Its
 manifest and public artifact have passed publication verification. Startup
 acknowledgement and last-known-good persistence remain part of the private
 walker acceptance run. Release commands are defined by
