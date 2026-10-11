@@ -21,7 +21,8 @@ The production profile uses the production API and defaults to the independently
 signed production client channel. It can still honor an authorized beta cohort,
 and the independently signed production plugin repository is enabled after
 catalog signature, public artifact hash, Worker catalog, and premium access
-control validation.
+control validation. Premium installation, verified-cache loading, entitlement
+revocation, and automatic runtime shutdown also passed in production.
 
 The current staging client is `cut-2.6.30-p17`, signed release sequence 3. It
 has passed verified download, startup acknowledgement, and last-known-good
