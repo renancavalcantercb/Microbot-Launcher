@@ -34,7 +34,7 @@ stable/beta/internal cohorts are now returned by the backend. Signed staging
 release discovery, download, rollback, and launch fail closed unless the
 authenticated account is assigned to `beta` or `internal`. Automatic fallback
 to the independently signed production channel is implemented. Production
-currently serves `cut-2.6.30-r2`, signed release sequence 2. The production JAR
+currently serves `cut-2.6.30-r2`, signed recovery sequence 3. The production JAR
 contains only the production ticket trust anchor; staging builds contain only
 the staging anchor. Production plugins trust only the separate
 `production-2026` catalog.

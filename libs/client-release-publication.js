@@ -114,6 +114,68 @@ function prepareClientRelease({
     }
 }
 
+function prepareClientRollback({
+    sourceDirectory,
+    outputDirectory,
+    channel,
+    sequence,
+    keyId,
+    privateKeyPem,
+    publicKey,
+    publishedAt = new Date().toISOString()
+}) {
+    const source = readAndVerifyBundle({
+        outputDirectory: sourceDirectory,
+        channel,
+        keyId,
+        publicKey
+    });
+    if (sequence <= source.payload.sequence) {
+        throw new Error(
+            `rollback sequence ${sequence} must be greater than source sequence ${source.payload.sequence}`
+        );
+    }
+    const prepared = prepareClientRelease({
+        sourceJar: source.artifactFile,
+        outputDirectory,
+        channel,
+        version: source.payload.client.version,
+        sequence,
+        minimumLauncherVersion: source.payload.client.minimumLauncherVersion,
+        keyId,
+        privateKeyPem,
+        publicKey,
+        publishedAt,
+        sourceCommit: source.metadata.sourceCommit,
+        sourceDirty: source.metadata.sourceDirty
+    });
+    const preparedClient = prepared.payload.client;
+    const sourceClient = source.payload.client;
+    if (
+        preparedClient.version !== sourceClient.version ||
+        preparedClient.minimumLauncherVersion !== sourceClient.minimumLauncherVersion ||
+        preparedClient.artifactPath !== sourceClient.artifactPath ||
+        preparedClient.size !== sourceClient.size ||
+        preparedClient.sha256 !== sourceClient.sha256
+    ) {
+        fs.rmSync(outputDirectory, { recursive: true, force: true });
+        throw new Error('rollback payload does not exactly reuse the source client artifact');
+    }
+    const metadataPath = path.join(outputDirectory, 'release.json');
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    fs.writeFileSync(metadataPath, `${JSON.stringify({
+        ...metadata,
+        reusesArtifact: true,
+        rollbackSource: {
+            version: source.payload.client.version,
+            sequence: source.payload.sequence,
+            sha256: source.payload.client.sha256,
+            artifactObjectKey: source.payload.client.artifactPath
+        }
+    }, null, 2)}\n`, 'utf8');
+    return { ...prepared, source };
+}
+
 function readAndVerifyBundle({ outputDirectory, channel, keyId, publicKey }) {
     const metadata = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'release.json'), 'utf8'));
     const envelope = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'manifest.json'), 'utf8'));
@@ -148,6 +210,7 @@ function requireNewerSequence(candidate, current) {
 
 module.exports = {
     bundleDirectory,
+    prepareClientRollback,
     prepareClientRelease,
     readAndVerifyBundle,
     requireNewerSequence,

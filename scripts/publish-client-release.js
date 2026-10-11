@@ -7,6 +7,7 @@ const { pipeline } = require('stream/promises');
 
 const {
     bundleDirectory,
+    prepareClientRollback,
     prepareClientRelease,
     readAndVerifyBundle,
     requireNewerSequence,
@@ -21,6 +22,7 @@ function usage() {
     return [
         'Usage:',
         '  node scripts/publish-client-release.js prepare --version <version> --sequence <n> [--source-jar <path>] [--skip-build] [--allow-dirty]',
+        '  node scripts/publish-client-release.js prepare-rollback --version <known-good-version> --source-sequence <n> --sequence <next-sequence>',
         '  node scripts/publish-client-release.js stage --version <version> --sequence <n> [--resume]',
         '  node scripts/publish-client-release.js promote --version <version> --sequence <n> --confirm-promote',
         '  node scripts/publish-client-release.js verify --version <version> --sequence <n>',
@@ -32,7 +34,7 @@ function usage() {
 
 function parseArguments(argv) {
     const [command, ...rest] = argv;
-    if (!['prepare', 'stage', 'promote', 'verify'].includes(command)) {
+    if (!['prepare', 'prepare-rollback', 'stage', 'promote', 'verify'].includes(command)) {
         throw new Error(usage());
     }
     const options = {};
@@ -52,6 +54,15 @@ function parseArguments(argv) {
     if (!options.version || !options.sequence) throw new Error(usage());
     options.sequence = Number(options.sequence);
     validateReleaseIdentity(options.version, options.sequence);
+    if (command === 'prepare-rollback') {
+        options['source-sequence'] = Number(options['source-sequence']);
+        if (!Number.isSafeInteger(options['source-sequence']) || options['source-sequence'] <= 0) {
+            throw new Error('prepare-rollback requires a positive --source-sequence');
+        }
+        if (options.sequence <= options['source-sequence']) {
+            throw new Error('rollback sequence must be greater than source sequence');
+        }
+    }
     return { command, options };
 }
 
@@ -260,6 +271,36 @@ async function prepare(config, options) {
     );
 }
 
+async function prepareRollback(config, options) {
+    const sourceDirectory = bundleDirectory(
+        path.join(launcherRoot, '.release-work'),
+        config.channel,
+        options.version,
+        options['source-sequence']
+    );
+    const outputDirectory = bundleDirectory(
+        path.join(launcherRoot, '.release-work'),
+        config.channel,
+        options.version,
+        options.sequence
+    );
+    const result = prepareClientRollback({
+        sourceDirectory,
+        outputDirectory,
+        channel: config.channel,
+        sequence: options.sequence,
+        keyId: config.keyId,
+        privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
+        publicKey: config.publicKey
+    });
+    process.stdout.write(
+        `Prepared rollback to ${options.version} at sequence ${options.sequence}\n` +
+        `Reused sequence: ${result.source.payload.sequence}\n` +
+        `SHA-256: ${result.payload.client.sha256}\n` +
+        `Bundle: ${outputDirectory}\n`
+    );
+}
+
 async function stage(config, options) {
     const bundle = releaseBundle(config, options);
     if (bundle.metadata.sourceDirty) {
@@ -272,7 +313,10 @@ async function stage(config, options) {
     if (![200, 404].includes(head.status)) {
         throw new Error(`artifact preflight returned unexpected HTTP ${head.status}`);
     }
-    if (head.status !== 404 && !options.resume) {
+    if (bundle.metadata.reusesArtifact && head.status === 404) {
+        throw new Error('known-good rollback artifact is no longer available');
+    }
+    if (head.status !== 404 && !bundle.metadata.reusesArtifact && !options.resume) {
         throw new Error(`immutable artifact already exists (HTTP ${head.status}); use --resume only to verify it`);
     }
 
@@ -404,6 +448,7 @@ async function main(argv = process.argv.slice(2)) {
     const { command, options } = parseArguments(argv);
     const config = loadConfiguration(options.config);
     if (command === 'prepare') return prepare(config, options);
+    if (command === 'prepare-rollback') return prepareRollback(config, options);
     if (command === 'stage') return stage(config, options);
     if (command === 'promote') return promote(config, options);
     return verify(config, options);

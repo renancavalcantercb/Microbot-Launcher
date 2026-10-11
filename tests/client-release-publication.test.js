@@ -5,6 +5,7 @@ const path = require('path');
 
 const {
     bundleDirectory,
+    prepareClientRollback,
     prepareClientRelease,
     readAndVerifyBundle,
     requireNewerSequence
@@ -105,6 +106,46 @@ describe('client release publication', () => {
         expect(() => requireNewerSequence({ sequence: 3 }, { sequence: 2 })).not.toThrow();
     });
 
+    test('prepares a higher-sequence rollback that exactly reuses a verified artifact', () => {
+        const sourceJar = path.join(directory, 'source.jar');
+        fs.writeFileSync(sourceJar, 'known-good client bytes');
+        const sourceDirectory = bundleDirectory(directory, 'production', 'cut-2.6.30-r2', 2);
+        prepareClientRelease({
+            sourceJar,
+            outputDirectory: sourceDirectory,
+            channel: 'production',
+            version: 'cut-2.6.30-r2',
+            sequence: 2,
+            minimumLauncherVersion: '3.2.10',
+            keyId: 'release-production-test',
+            privateKeyPem,
+            publicKey,
+            publishedAt: '2026-10-11T01:00:00.000Z',
+            sourceCommit: 'abc123',
+            sourceDirty: false
+        });
+        const outputDirectory = bundleDirectory(directory, 'production', 'cut-2.6.30-r2', 3);
+        const rollback = prepareClientRollback({
+            sourceDirectory,
+            outputDirectory,
+            channel: 'production',
+            sequence: 3,
+            keyId: 'release-production-test',
+            privateKeyPem,
+            publicKey,
+            publishedAt: '2026-10-11T02:00:00.000Z'
+        });
+        const metadata = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'release.json'), 'utf8'));
+
+        expect(rollback.payload.client).toEqual(rollback.source.payload.client);
+        expect(metadata.reusesArtifact).toBe(true);
+        expect(metadata.rollbackSource).toMatchObject({
+            version: 'cut-2.6.30-r2',
+            sequence: 2,
+            sha256: rollback.source.payload.client.sha256
+        });
+    });
+
     test('parses explicit safe release commands', () => {
         expect(parseArguments([
             'promote', '--version', 'cut-2.6.30-p17', '--sequence', '3', '--confirm-promote'
@@ -116,6 +157,21 @@ describe('client release publication', () => {
                 'confirm-promote': true
             }
         });
+        expect(parseArguments([
+            'prepare-rollback', '--version', 'cut-2.6.30-r2',
+            '--source-sequence', '2', '--sequence', '3'
+        ])).toEqual({
+            command: 'prepare-rollback',
+            options: {
+                version: 'cut-2.6.30-r2',
+                'source-sequence': 2,
+                sequence: 3
+            }
+        });
+        expect(() => parseArguments([
+            'prepare-rollback', '--version', 'cut-2.6.30-r2',
+            '--source-sequence', '2', '--sequence', '2'
+        ])).toThrow('rollback sequence must be greater than source sequence');
         expect(() => parseArguments(['stage', '--version', '../bad', '--sequence', '3']))
             .toThrow('client version is invalid');
     });
