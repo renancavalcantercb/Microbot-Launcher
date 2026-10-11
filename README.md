@@ -31,9 +31,10 @@ Staging is currently an operator-selected environment. Server-controlled
 stable/beta/internal cohorts are now returned by the backend. Signed staging
 release discovery, download, rollback, and launch fail closed unless the
 authenticated account is assigned to `beta` or `internal`. Automatic fallback
-to the independently signed production channel is implemented and awaits the
-final live cohort-switch test. Production currently serves `cut-2.6.30`, signed
-release sequence 1. External product plugins remain disabled on production until
+to the independently signed production channel is implemented. Production
+currently serves `cut-2.6.30-r2`, signed release sequence 2. The production JAR
+contains only the production ticket trust anchor; staging builds contain only
+the staging anchor. External product plugins remain disabled on production until
 its separate signed plugin catalog is published.
 
 <img width="1915" height="1197" alt="image" src="https://github.com/user-attachments/assets/dfa1f620-ed5a-409c-97f0-f2c6e86e9a8a" />
