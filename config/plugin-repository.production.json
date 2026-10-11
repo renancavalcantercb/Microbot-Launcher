@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "productApiBaseUrl": "https://cut.xulixnacc.online/api/v1",
+  "manifestUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-production/catalog.json",
+  "releasesUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-production/",
+  "publicKeyId": "production-2026",
+  "publicKey": "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAxD42yYB66j6Do/VX8RHBJgvNancpR2dbcRnPhgiObhbfdiQIuWy/nM2hcNtw+uQHICFjswSU+e8OZjBYDUa5f8lX7dSsrcbR/R3pKRX7I5BYVG9fuvtPRBBtq06zIfL3P3Tc/eu/73u58s76bb/L73dB28h1O4OS19EzFATMS55VRU1Ldk42W/Bph3e+iUgl0+hwTquGDNoBTOzmvPjWHsVKyvf0XN/OlpC1uULcTB1F1MjcXSveFI7BoNPhdAu8F0hSHwnXtD8Vy6E8A7KUJ1Zqj3ia1EKQazIO8R1bAZWC1ITCrRgaD1P14TWkGQ0iGkfY1UGScztj4pmnRYDXvj/ihfasrn4fEnMBxQwhJF9Y++ewgtbWxya2HFTXroinwcE3IlNcNNJ5im5NbxixV8j/G/zq6grLvBEYq0qj8mCskPdFrmZHIZjJd+pDqnWU+eOxnT/vaqe2JHKxmmsS3rubknDYXoheLVWd3Y+GU4PJzY1A99wS8i5KeK8KSvSlAgMBAAE="
+}

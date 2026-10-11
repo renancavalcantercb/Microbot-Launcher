@@ -1,15 +1,13 @@
 param(
-    [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.production.json')
+    [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.production.json'),
+    [string]$PluginConfigPath = (Join-Path $PSScriptRoot '..\config\plugin-repository.production.json')
 )
 
 $ErrorActionPreference = 'Stop'
 $launcherRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $env:MICROBOT_CUT_API_BASE_URL = 'https://cut.xulixnacc.online/api/v1'
 
-# Production plugins remain disabled until an independently signed production
-# catalog and artifact repository are published.
 Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV -ErrorAction SilentlyContinue
-$env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'false'
 foreach ($name in @(
     'MICROBOT_CUT_PLUGIN_MANIFEST_URL',
     'MICROBOT_CUT_PLUGIN_RELEASES_URL',
@@ -25,6 +23,28 @@ foreach ($name in @(
     'MICROBOT_CUT_RELEASE_CHANNELS'
 )) {
     Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+}
+
+$resolvedPluginConfig = (Resolve-Path -LiteralPath $PluginConfigPath).Path
+$pluginRepository = Get-Content -Raw -LiteralPath $resolvedPluginConfig | ConvertFrom-Json
+$env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = if ($pluginRepository.enabled -eq $true) { 'true' } else { 'false' }
+if ($pluginRepository.enabled -eq $true) {
+    foreach ($property in @('productApiBaseUrl', 'manifestUrl', 'releasesUrl', 'publicKey', 'publicKeyId')) {
+        if ([string]::IsNullOrWhiteSpace([string]$pluginRepository.$property)) {
+            throw "Production plugin repository config is missing: $property"
+        }
+    }
+    foreach ($urlValue in @($pluginRepository.productApiBaseUrl, $pluginRepository.manifestUrl, $pluginRepository.releasesUrl)) {
+        $uri = [Uri]$urlValue
+        if ($uri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($uri.UserInfo)) {
+            throw "Production plugin repository URL must use HTTPS without credentials: $urlValue"
+        }
+    }
+    $env:MICROBOT_CUT_API_BASE_URL = $pluginRepository.productApiBaseUrl
+    $env:MICROBOT_CUT_PLUGIN_MANIFEST_URL = $pluginRepository.manifestUrl
+    $env:MICROBOT_CUT_PLUGIN_RELEASES_URL = $pluginRepository.releasesUrl
+    $env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY = $pluginRepository.publicKey
+    $env:MICROBOT_CUT_PLUGIN_PUBLIC_KEY_ID = $pluginRepository.publicKeyId
 }
 
 $resolvedReleaseConfig = (Resolve-Path -LiteralPath $ReleaseConfigPath).Path
