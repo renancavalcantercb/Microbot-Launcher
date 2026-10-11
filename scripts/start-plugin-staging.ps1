@@ -2,7 +2,7 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot '..\config\plugin-repository.staging.json'),
     [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.staging.json'),
     [switch]$PluginDevelopment,
-    [string]$PluginJar = (Join-Path $PSScriptRoot '..\..\microbot-cut-plugins\plugins\cut-walker\build\libs\cut-walker-0.1.0.jar')
+    [string]$PluginJar = (Join-Path $PSScriptRoot '..\..\microbot-cut-plugins\plugins\cut-walker\build\libs\cut-walker-0.1.1.jar')
 )
 
 $ErrorActionPreference = 'Stop'
