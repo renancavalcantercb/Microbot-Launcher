@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "productApiBaseUrl": "https://cut.xulixnacc.online/api/v1",
   "manifestUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-production/catalog.json",
   "releasesUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-production/",

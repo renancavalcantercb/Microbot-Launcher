@@ -19,9 +19,9 @@ npm.cmd run dev:production
 
 The production profile uses the production API and defaults to the independently
 signed production client channel. It can still honor an authorized beta cohort,
-but the external plugin repository remains disabled until the independently
-signed production plugin catalog is published and verified. Its trust
-configuration is staged with `enabled: false` for a fail-closed rollout.
+and the independently signed production plugin repository is enabled after
+catalog signature, public artifact hash, Worker catalog, and premium access
+control validation.
 
 The current staging client is `cut-2.6.30-p17`, signed release sequence 3. It
 has passed verified download, startup acknowledgement, and last-known-good
@@ -35,8 +35,8 @@ authenticated account is assigned to `beta` or `internal`. Automatic fallback
 to the independently signed production channel is implemented. Production
 currently serves `cut-2.6.30-r2`, signed release sequence 2. The production JAR
 contains only the production ticket trust anchor; staging builds contain only
-the staging anchor. External product plugins remain disabled on production until
-the separate `production-2026` catalog is published and verified.
+the staging anchor. Production plugins trust only the separate
+`production-2026` catalog.
 
 <img width="1915" height="1197" alt="image" src="https://github.com/user-attachments/assets/dfa1f620-ed5a-409c-97f0-f2c6e86e9a8a" />
 
