@@ -69,9 +69,11 @@ function main() {
 
         // package.json must already match product-config.js: syncing may not change anything.
         run(process.execPath, ['scripts/sync-product-config.js'], worktree, 'product:sync');
-        if (output('git', ['status', '--porcelain', '--untracked-files=no'], worktree)) {
+        // Only line endings may differ (the script writes LF); restore the committed bytes after.
+        if (output('git', ['diff', '--ignore-cr-at-eol', '--stat'], worktree)) {
             throw new Error('product:sync changed package.json; commit the synchronized file first.');
         }
+        run('git', ['checkout', '--', 'package.json'], worktree, 'git checkout package.json');
 
         // The installers carry the npm ci dependency tree, so the tests must run on that tree.
         testResults = runTests(worktree);
