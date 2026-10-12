@@ -17,6 +17,36 @@ function validateLauncherVersion(version, label = 'launcher version') {
     }
 }
 
+// semver precedence for the versions the contract allows (no build metadata).
+function compareLauncherVersions(left, right) {
+    validateLauncherVersion(left);
+    validateLauncherVersion(right);
+    const split = (value) => {
+        const [core, ...pre] = value.split('-');
+        return { numbers: core.split('.').map(Number), pre: pre.length ? pre.join('-').split('.') : [] };
+    };
+    const a = split(left);
+    const b = split(right);
+    for (let index = 0; index < 3; index += 1) {
+        if (a.numbers[index] !== b.numbers[index]) return a.numbers[index] < b.numbers[index] ? -1 : 1;
+    }
+    if (a.pre.length === 0 || b.pre.length === 0) {
+        if (a.pre.length === b.pre.length) return 0;
+        return a.pre.length === 0 ? 1 : -1;
+    }
+    for (let index = 0; index < Math.max(a.pre.length, b.pre.length); index += 1) {
+        if (a.pre[index] === undefined) return -1;
+        if (b.pre[index] === undefined) return 1;
+        if (a.pre[index] === b.pre[index]) continue;
+        const numericA = /^\d+$/.test(a.pre[index]);
+        const numericB = /^\d+$/.test(b.pre[index]);
+        if (numericA && numericB) return Number(a.pre[index]) < Number(b.pre[index]) ? -1 : 1;
+        if (numericA !== numericB) return numericA ? -1 : 1;
+        return a.pre[index] < b.pre[index] ? -1 : 1;
+    }
+    return 0;
+}
+
 function installerFileName(version) {
     validateLauncherVersion(version);
     return `Microbot-Cut-Launcher-Setup-${version}.exe`;
@@ -192,7 +222,10 @@ function prepareLauncherRelease({
     releaseDate = publishedAt,
     // candidate.json of this binary, and (for production) of the staging binary of the same release.
     candidate,
-    stagingCandidate = null
+    stagingCandidate = null,
+    // The SHA-256 recorded in L3-VALIDATION.md for the installer that passed L3. It is typed by the
+    // operator, so only the bytes that were validated can be prepared for publication.
+    validatedSha256
 }) {
     validateLauncherVersion(version);
     validateLauncherVersion(minimumSupportedVersion, 'minimum supported launcher version');
@@ -208,6 +241,10 @@ function prepareLauncherRelease({
         throw new Error(`installer file name must be ${fileName}`);
     }
     verifyLauncherCandidate({ candidate, installerPath, channel, version });
+    if (!SHA256_PATTERN.test(validatedSha256 || '')) throw new Error('the validated installer SHA-256 is required');
+    if (validatedSha256 !== candidate.sha256) {
+        throw new Error('the installer is not the one that was validated: SHA-256 differs from the validated value');
+    }
     if (channel === 'production') {
         if (!stagingCandidate) throw new Error('a production launcher requires the staging candidate of the same release');
         requireSameSourceCandidates(stagingCandidate, candidate);
@@ -281,17 +318,37 @@ function prepareLauncherRelease({
             sha512Base64: described.sha512Base64,
             candidateObjectKey: `releases/${channel}/candidates/sequence-${sequence}-manifest.json`,
             manifestObjectKey: `releases/${channel}/manifest.json`,
+            reusesArtifact: false,
+            validatedSha256,
             profile: candidate.profile,
             sourceCommit: candidate.sourceCommit,
             sourceDirty: false,
             embeddedProfileSha256: candidate.embeddedProfileSha256,
             appAsarSha256: candidate.appAsarSha256,
+            // Evidence that the production bytes belong to a release that exists on staging.
+            stagingCandidate: stagingCandidate
+                ? {
+                    version: stagingCandidate.version,
+                    size: stagingCandidate.size,
+                    sha256: stagingCandidate.sha256,
+                    sourceCommit: stagingCandidate.sourceCommit
+                }
+                : null,
             preparedAt: new Date().toISOString()
         });
         return { payload, envelope, artifactFile, updaterFile };
     } catch (error) {
         fs.rmSync(outputDirectory, { recursive: true, force: true });
         throw error;
+    }
+}
+
+function requireDerivedObjectKeys(metadata, channel, sequence) {
+    if (
+        metadata.candidateObjectKey !== `releases/${channel}/candidates/sequence-${sequence}-manifest.json` ||
+        metadata.manifestObjectKey !== `releases/${channel}/manifest.json`
+    ) {
+        throw new Error('release metadata object keys do not match the release');
     }
 }
 
@@ -319,6 +376,22 @@ function readAndVerifyLauncherBundle({ outputDirectory, channel, keyId, publicKe
         installerPath: artifactFile,
         version: payload.launcher.version
     });
+    requireDerivedObjectKeys(metadata, channel, payload.sequence);
+    if (metadata.validatedSha256 !== entry.sha256) {
+        throw new Error('release metadata does not record the validated installer SHA-256');
+    }
+    if (channel === 'production' && !metadata.reusesArtifact) {
+        const staging = metadata.stagingCandidate;
+        if (
+            !staging ||
+            staging.version !== metadata.version ||
+            staging.sourceCommit !== metadata.sourceCommit ||
+            staging.sha256 === entry.sha256 ||
+            !SHA256_PATTERN.test(staging.sha256 || '')
+        ) {
+            throw new Error('production release metadata does not carry its staging candidate');
+        }
+    }
     if (
         metadata.kind !== 'launcher' ||
         metadata.channel !== channel ||
@@ -332,6 +405,174 @@ function readAndVerifyLauncherBundle({ outputDirectory, channel, keyId, publicKe
         throw new Error('release metadata does not match its signed manifest');
     }
     return { metadata, envelope, payload, artifactFile, updaterFile };
+}
+
+// A launcher release prepared from a previous bundle: the same installer and latest.yml objects
+// (nothing is uploaded), a higher sequence, and the client entry of the manifest that is live now.
+function prepareLauncherRollback({
+    sourceDirectory,
+    outputDirectory,
+    channel,
+    sequence,
+    currentClient,
+    keyId,
+    privateKeyPem,
+    publicKey,
+    publishedAt = new Date().toISOString()
+}) {
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+        throw new Error('release sequence must be a positive safe integer');
+    }
+    if (!currentClient || typeof currentClient !== 'object') {
+        throw new Error('a launcher release must carry over the current client entry');
+    }
+    const source = readAndVerifyLauncherBundle({ outputDirectory: sourceDirectory, channel, keyId, publicKey });
+    if (sequence <= source.payload.sequence) {
+        throw new Error(`rollback sequence ${sequence} must be greater than source sequence ${source.payload.sequence}`);
+    }
+    if (fs.existsSync(outputDirectory)) throw new Error(`release bundle already exists: ${outputDirectory}`);
+
+    fs.mkdirSync(outputDirectory, { recursive: true });
+    try {
+        const fileName = installerFileName(source.payload.launcher.version);
+        fs.copyFileSync(source.artifactFile, path.join(outputDirectory, fileName), fs.constants.COPYFILE_EXCL);
+        fs.copyFileSync(source.updaterFile, path.join(outputDirectory, 'latest.yml'), fs.constants.COPYFILE_EXCL);
+        const payload = {
+            schemaVersion: 1,
+            channel,
+            sequence,
+            publishedAt,
+            launcher: source.payload.launcher,
+            client: currentClient
+        };
+        const envelope = signReleaseManifest(payload, { keyId, privateKeyPem });
+        verifyReleaseManifest(envelope, { expectedChannel: channel, trustedKeys: { [keyId]: publicKey } });
+        writeJsonExclusive(path.join(outputDirectory, 'payload.json'), payload);
+        writeJsonExclusive(path.join(outputDirectory, 'manifest.json'), envelope);
+        writeJsonExclusive(path.join(outputDirectory, 'release.json'), {
+            ...source.metadata,
+            sequence,
+            candidateObjectKey: `releases/${channel}/candidates/sequence-${sequence}-manifest.json`,
+            reusesArtifact: true,
+            rollbackSource: {
+                version: source.payload.launcher.version,
+                sequence: source.payload.sequence,
+                sha256: source.metadata.sha256,
+                artifactObjectKey: source.metadata.artifactObjectKey
+            },
+            preparedAt: new Date().toISOString()
+        });
+        return { payload, envelope, source };
+    } catch (error) {
+        fs.rmSync(outputDirectory, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+function launcherWithdrawalDirectory(workRoot, channel, sequence) {
+    if (!CHANNELS.includes(channel)) throw new Error('release channel is invalid');
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+        throw new Error('release sequence must be a positive safe integer');
+    }
+    return path.join(workRoot, channel, `sequence-${sequence}-launcher-withdrawal`);
+}
+
+// Emergency brake: a higher-sequence manifest with no launcher, so the Download page reports the
+// installer as unavailable. The client entry is carried over from the live manifest. It does not
+// uninstall anything and the objects stay in R2.
+function prepareLauncherWithdrawal({
+    outputDirectory,
+    channel,
+    sequence,
+    currentClient,
+    keyId,
+    privateKeyPem,
+    publicKey,
+    publishedAt = new Date().toISOString()
+}) {
+    if (!currentClient || typeof currentClient !== 'object') {
+        throw new Error('a launcher release must carry over the current client entry');
+    }
+    if (fs.existsSync(outputDirectory)) throw new Error(`release bundle already exists: ${outputDirectory}`);
+    fs.mkdirSync(outputDirectory, { recursive: true });
+    try {
+        const payload = { schemaVersion: 1, channel, sequence, publishedAt, launcher: null, client: currentClient };
+        const envelope = signReleaseManifest(payload, { keyId, privateKeyPem });
+        verifyReleaseManifest(envelope, { expectedChannel: channel, trustedKeys: { [keyId]: publicKey } });
+        writeJsonExclusive(path.join(outputDirectory, 'payload.json'), payload);
+        writeJsonExclusive(path.join(outputDirectory, 'manifest.json'), envelope);
+        writeJsonExclusive(path.join(outputDirectory, 'release.json'), {
+            kind: 'launcher-withdrawal',
+            channel,
+            sequence,
+            sourceDirty: false,
+            candidateObjectKey: `releases/${channel}/candidates/sequence-${sequence}-manifest.json`,
+            manifestObjectKey: `releases/${channel}/manifest.json`,
+            preparedAt: new Date().toISOString()
+        });
+        return { payload, envelope };
+    } catch (error) {
+        fs.rmSync(outputDirectory, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+function readAndVerifyLauncherWithdrawal({ outputDirectory, channel, keyId, publicKey }) {
+    const metadata = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'release.json'), 'utf8'));
+    const envelope = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'manifest.json'), 'utf8'));
+    const payload = verifyReleaseManifest(envelope, { expectedChannel: channel, trustedKeys: { [keyId]: publicKey } });
+    if (
+        metadata.kind !== 'launcher-withdrawal' ||
+        metadata.channel !== channel ||
+        metadata.sequence !== payload.sequence ||
+        payload.launcher !== null
+    ) {
+        throw new Error('withdrawal metadata does not match its signed manifest');
+    }
+    requireDerivedObjectKeys(metadata, channel, payload.sequence);
+    return { metadata, envelope, payload };
+}
+
+// The launcher a regular release publishes must be newer than the live one; going back is a
+// rollback (prepareLauncherRollback), which is explicit and reuses already published objects.
+function requireNewerLauncherVersion(candidate, current) {
+    const live = current?.launcher;
+    if (!live) return;
+    if (compareLauncherVersions(candidate.launcher.version, live.version) <= 0) {
+        throw new Error(
+            `launcher ${candidate.launcher.version} must be newer than the live launcher ${live.version}; use a rollback to go back`
+        );
+    }
+}
+
+// Production only publishes a release that is already live on staging with the staging bytes.
+function requireStagingPublished(stagingLive, stagingEvidence) {
+    const entry = stagingLive?.launcher?.platforms?.[LAUNCHER_PLATFORM];
+    if (
+        !stagingEvidence ||
+        !entry ||
+        stagingLive.launcher.version !== stagingEvidence.version ||
+        entry.sha256 !== stagingEvidence.sha256 ||
+        entry.size !== stagingEvidence.size
+    ) {
+        throw new Error(
+            'the staging channel does not list this release with the staging candidate bytes; publish and validate it on staging first'
+        );
+    }
+}
+
+// The only object keys a launcher release may write for a channel. Anything else (a client
+// artifact, another channel, a different version) is a bug and is refused before R2 is touched.
+function requireAllowedLauncherWriteKey(channel, key, { version = null, sequence }) {
+    const candidate = `releases/${channel}/candidates/sequence-${sequence}-manifest.json`;
+    const live = `releases/${channel}/manifest.json`;
+    const allowed = new Set([candidate, live]);
+    if (version) {
+        const keys = launcherObjectKeys(version);
+        allowed.add(keys.installer);
+        allowed.add(keys.updater);
+    }
+    if (!allowed.has(key)) throw new Error(`refusing to write an object outside the release: ${key}`);
 }
 
 // Key order is not significant: verified manifests may normalize it.
@@ -365,16 +606,25 @@ module.exports = {
     LAUNCHER_PLATFORM,
     LAUNCHER_VERSION_PATTERN,
     buildUpdaterMetadata,
+    canonicalJson,
+    compareLauncherVersions,
     describeInstaller,
     installerFileName,
     launcherBundleDirectory,
     launcherObjectKeys,
+    launcherWithdrawalDirectory,
     parseUpdaterMetadata,
     prepareLauncherRelease,
+    prepareLauncherRollback,
+    prepareLauncherWithdrawal,
     readAndVerifyLauncherBundle,
+    readAndVerifyLauncherWithdrawal,
+    requireAllowedLauncherWriteKey,
     requireClientReleaseKeepsLauncher,
     requireLauncherReleaseKeepsClient,
+    requireNewerLauncherVersion,
     requireSameSourceCandidates,
+    requireStagingPublished,
     validateLauncherVersion,
     verifyLauncherCandidate,
     verifyUpdaterMetadata

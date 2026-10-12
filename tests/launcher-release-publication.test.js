@@ -5,15 +5,23 @@ const path = require('path');
 
 const {
     buildUpdaterMetadata,
+    compareLauncherVersions,
     installerFileName,
     launcherBundleDirectory,
     launcherObjectKeys,
+    launcherWithdrawalDirectory,
     parseUpdaterMetadata,
     prepareLauncherRelease,
+    prepareLauncherRollback,
+    prepareLauncherWithdrawal,
     readAndVerifyLauncherBundle,
+    readAndVerifyLauncherWithdrawal,
+    requireAllowedLauncherWriteKey,
     requireClientReleaseKeepsLauncher,
     requireLauncherReleaseKeepsClient,
+    requireNewerLauncherVersion,
     requireSameSourceCandidates,
+    requireStagingPublished,
     verifyLauncherCandidate,
     verifyUpdaterMetadata
 } = require('../libs/launcher-release-publication');
@@ -86,6 +94,9 @@ describe('launcher release publication', () => {
         publicKey,
         publishedAt: '2026-10-12T12:00:00.000Z',
         candidate: candidateFor('staging', installerBytes),
+        validatedSha256: overrides.candidate && overrides.candidate.sha256
+            ? overrides.candidate.sha256
+            : crypto.createHash('sha256').update(installerBytes).digest('hex'),
         ...overrides
     });
 
@@ -449,6 +460,193 @@ describe('launcher release publication', () => {
         test('verifyLauncherCandidate returns the validated record', () => {
             const candidate = candidateFor('staging', stagingBytes());
             expect(verifyLauncherCandidate({ candidate, installerPath, channel: 'staging', version: VERSION })).toBe(candidate);
+        });
+    });
+
+    describe('validated bytes, version order and rollback', () => {
+        const KEY_ID = 'release-staging-test';
+
+        test('only the validated installer can be prepared', () => {
+            expect(() => prepare({ validatedSha256: undefined })).toThrow(/validated installer SHA-256 is required/);
+            expect(() => prepare({ validatedSha256: 'not-a-hash' })).toThrow(/validated installer SHA-256 is required/);
+            expect(() => prepare({ validatedSha256: 'c'.repeat(64) })).toThrow(/not the one that was validated/);
+            expect(fs.existsSync(launcherBundleDirectory(directory, 'staging', VERSION, 20))).toBe(false);
+        });
+
+        test('a bundle without the validated SHA-256 in its metadata is refused', () => {
+            prepare();
+            const outputDirectory = launcherBundleDirectory(directory, 'staging', VERSION, 20);
+            const file = path.join(outputDirectory, 'release.json');
+            const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+            fs.writeFileSync(file, JSON.stringify({ ...release, validatedSha256: 'd'.repeat(64) }));
+            expect(() => readAndVerifyLauncherBundle({ outputDirectory, channel: 'staging', keyId: KEY_ID, publicKey }))
+                .toThrow(/validated installer SHA-256/);
+        });
+
+        test('a production bundle records the staging candidate and refuses metadata without it', () => {
+            const productionBytes = crypto.randomBytes(4096);
+            const stagingCandidate = candidateFor('staging', installerBytes);
+            fs.writeFileSync(installerPath, productionBytes);
+            const outputDirectory = launcherBundleDirectory(directory, 'production', VERSION, 21);
+            prepare({
+                outputDirectory,
+                channel: 'production',
+                sequence: 21,
+                candidate: candidateFor('production', productionBytes),
+                stagingCandidate
+            });
+            const file = path.join(outputDirectory, 'release.json');
+            const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+            expect(release.stagingCandidate).toEqual({
+                version: VERSION, size: stagingCandidate.size, sha256: stagingCandidate.sha256, sourceCommit: COMMIT
+            });
+            const read = () => readAndVerifyLauncherBundle({ outputDirectory, channel: 'production', keyId: KEY_ID, publicKey });
+            expect(read().metadata.profile).toBe('production');
+            for (const tampered of [null, { ...release.stagingCandidate, sha256: release.sha256 }, { ...release.stagingCandidate, sourceCommit: 'e'.repeat(40) }]) {
+                fs.writeFileSync(file, JSON.stringify({ ...release, stagingCandidate: tampered }));
+                expect(read).toThrow(/staging candidate/);
+            }
+        });
+
+        test('compares versions by semver precedence', () => {
+            expect(compareLauncherVersions('3.2.11', '3.2.10')).toBe(1);
+            expect(compareLauncherVersions('3.2.10', '3.2.11')).toBe(-1);
+            expect(compareLauncherVersions('3.10.0', '3.9.9')).toBe(1);
+            expect(compareLauncherVersions('3.2.11', '3.2.11')).toBe(0);
+            expect(compareLauncherVersions('3.2.11-beta.1', '3.2.11')).toBe(-1);
+            expect(compareLauncherVersions('3.2.11-beta.2', '3.2.11-beta.10')).toBe(-1);
+            expect(compareLauncherVersions('3.2.11-beta', '3.2.11-beta.1')).toBe(-1);
+            expect(() => compareLauncherVersions('3.2', '3.2.1')).toThrow(/invalid/);
+        });
+
+        test('a regular release must be newer than the live launcher', () => {
+            const candidate = prepare().payload;
+            const live = (version) => ({ launcher: { ...candidate.launcher, version } });
+            expect(() => requireNewerLauncherVersion(candidate, { launcher: null })).not.toThrow();
+            expect(() => requireNewerLauncherVersion(candidate, null)).not.toThrow();
+            expect(() => requireNewerLauncherVersion(candidate, live('3.2.10'))).not.toThrow();
+            expect(() => requireNewerLauncherVersion(candidate, live('3.2.11'))).toThrow(/must be newer/);
+            expect(() => requireNewerLauncherVersion(candidate, live('3.2.12'))).toThrow(/use a rollback/);
+        });
+
+        test('production needs the same release live on staging with the staging bytes', () => {
+            const evidence = { version: VERSION, size: 4096, sha256: 'a'.repeat(64) };
+            const stagingLive = (changes = {}) => ({
+                launcher: {
+                    version: VERSION,
+                    platforms: { 'windows-x64': { size: 4096, sha256: 'a'.repeat(64), ...changes } }
+                }
+            });
+            expect(() => requireStagingPublished(stagingLive(), evidence)).not.toThrow();
+            expect(() => requireStagingPublished(null, evidence)).toThrow(/publish and validate it on staging/);
+            expect(() => requireStagingPublished({ launcher: null }, evidence)).toThrow(/staging channel/);
+            expect(() => requireStagingPublished(stagingLive({ sha256: 'b'.repeat(64) }), evidence)).toThrow(/staging channel/);
+            expect(() => requireStagingPublished(stagingLive({ size: 1 }), evidence)).toThrow(/staging channel/);
+            expect(() => requireStagingPublished({ ...stagingLive(), launcher: { ...stagingLive().launcher, version: '3.2.12' } }, evidence))
+                .toThrow(/staging channel/);
+            expect(() => requireStagingPublished(stagingLive(), null)).toThrow(/staging channel/);
+        });
+
+        test('only the keys of the release can be written', () => {
+            const context = { version: VERSION, sequence: 20 };
+            const keys = launcherObjectKeys(VERSION);
+            for (const key of [keys.installer, keys.updater, 'releases/staging/candidates/sequence-20-manifest.json', 'releases/staging/manifest.json']) {
+                expect(() => requireAllowedLauncherWriteKey('staging', key, context)).not.toThrow();
+            }
+            for (const key of [
+                'releases/production/manifest.json',
+                'releases/staging/candidates/sequence-21-manifest.json',
+                'releases/artifacts/launcher/3.2.12/windows/Microbot-Cut-Launcher-Setup-3.2.12.exe',
+                'releases/artifacts/client/cut-2.6.31-p13/microbot-cut-2.6.31-p13.jar',
+                'releases/staging/manifest.json/../x'
+            ]) {
+                expect(() => requireAllowedLauncherWriteKey('staging', key, context)).toThrow(/outside the release/);
+            }
+            expect(() => requireAllowedLauncherWriteKey('staging', keys.installer, { sequence: 20 })).toThrow(/outside the release/);
+        });
+
+        describe('rollback and withdrawal', () => {
+            const NEW_CLIENT = { ...CLIENT, version: 'cut-2.6.32', artifactPath: 'releases/artifacts/client/cut-2.6.32/microbot-cut-2.6.32.jar', sha256: 'c'.repeat(64) };
+
+            const rollback = (overrides = {}) => prepareLauncherRollback({
+                sourceDirectory: launcherBundleDirectory(directory, 'staging', VERSION, 20),
+                outputDirectory: launcherBundleDirectory(directory, 'staging', VERSION, 22),
+                channel: 'staging',
+                sequence: 22,
+                currentClient: NEW_CLIENT,
+                keyId: KEY_ID,
+                privateKeyPem,
+                publicKey,
+                publishedAt: '2026-10-13T12:00:00.000Z',
+                ...overrides
+            });
+
+            test('reuses the exact published installer with a higher sequence and the live client', () => {
+                const original = prepare();
+                const result = rollback();
+                expect(result.payload.sequence).toBe(22);
+                expect(result.payload.launcher).toEqual(original.payload.launcher);
+                expect(result.payload.client).toEqual(NEW_CLIENT);
+                const read = readAndVerifyLauncherBundle({
+                    outputDirectory: launcherBundleDirectory(directory, 'staging', VERSION, 22),
+                    channel: 'staging', keyId: KEY_ID, publicKey
+                });
+                expect(read.metadata).toMatchObject({
+                    reusesArtifact: true,
+                    rollbackSource: { version: VERSION, sequence: 20, sha256: original.payload.launcher.platforms['windows-x64'].sha256 }
+                });
+                expect(read.metadata.validatedSha256).toBe(original.payload.launcher.platforms['windows-x64'].sha256);
+                // The rollback has its own candidate object; it must not collide with the source one.
+                expect(read.metadata.candidateObjectKey).toBe('releases/staging/candidates/sequence-22-manifest.json');
+            });
+
+            test('object keys come from the release, never from release.json', () => {
+                prepare();
+                const outputDirectory = launcherBundleDirectory(directory, 'staging', VERSION, 20);
+                const file = path.join(outputDirectory, 'release.json');
+                const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+                for (const change of [
+                    { candidateObjectKey: 'releases/production/manifest.json' },
+                    { candidateObjectKey: 'releases/staging/candidates/sequence-19-manifest.json' },
+                    { manifestObjectKey: 'releases/production/manifest.json' }
+                ]) {
+                    fs.writeFileSync(file, JSON.stringify({ ...release, ...change }));
+                    expect(() => readAndVerifyLauncherBundle({ outputDirectory, channel: 'staging', keyId: KEY_ID, publicKey }))
+                        .toThrow(/object keys do not match/);
+                }
+            });
+
+            test('needs a higher sequence, a client entry and a fresh output directory', () => {
+                prepare();
+                expect(() => rollback({ sequence: 20 })).toThrow(/must be greater than source sequence/);
+                expect(() => rollback({ currentClient: null })).toThrow(/current client entry/);
+                rollback();
+                expect(() => rollback()).toThrow(/already exists/);
+            });
+
+            test('a tampered source bundle is not reused', () => {
+                prepare();
+                const source = launcherBundleDirectory(directory, 'staging', VERSION, 20);
+                fs.appendFileSync(path.join(source, installerFileName(VERSION)), 'x');
+                expect(() => rollback()).toThrow(/size does not match|SHA-256 does not match/);
+                expect(fs.existsSync(launcherBundleDirectory(directory, 'staging', VERSION, 22))).toBe(false);
+            });
+
+            test('a withdrawal publishes no launcher and keeps the live client', () => {
+                const outputDirectory = launcherWithdrawalDirectory(directory, 'staging', 23);
+                const result = prepareLauncherWithdrawal({
+                    outputDirectory, channel: 'staging', sequence: 23, currentClient: NEW_CLIENT,
+                    keyId: KEY_ID, privateKeyPem, publicKey
+                });
+                expect(result.payload.launcher).toBeNull();
+                expect(result.payload.client).toEqual(NEW_CLIENT);
+                expect(readAndVerifyLauncherWithdrawal({ outputDirectory, channel: 'staging', keyId: KEY_ID, publicKey }).metadata.kind)
+                    .toBe('launcher-withdrawal');
+                expect(() => prepareLauncherWithdrawal({
+                    outputDirectory, channel: 'staging', sequence: 23, currentClient: NEW_CLIENT, keyId: KEY_ID, privateKeyPem, publicKey
+                })).toThrow(/already exists/);
+                expect(() => readAndVerifyLauncherBundle({ outputDirectory, channel: 'staging', keyId: KEY_ID, publicKey })).toThrow();
+            });
         });
     });
 
