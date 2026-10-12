@@ -1,6 +1,6 @@
 {
   "name": "microbot-launcher",
-  "version": "3.2.10",
+  "version": "3.2.11",
   "description": "Launcher for the Microbot Cut client",
   "main": "main.js",
   "scripts": {
@@ -26,7 +26,7 @@
     "linux": "electron-builder --linux",
     "mac": "electron-builder --mac"
   },
-  "author": "Mocrosoft",
+  "author": "Microbot Cut",
   "license": "GPL-3.0-only",
   "devDependencies": {
     "@electron-forge/cli": "^7.8.1",
@@ -57,6 +57,7 @@
     "asar": "true",
     "appId": "com.microbotcut.launcher",
     "productName": "Microbot Cut Launcher",
+    "copyright": "Copyright © 2026 Microbot Cut",
     "files": [
       "main.js",
       "renderer.js",
@@ -75,7 +76,8 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "images/microbot_cut.png"
+      "icon": "images/microbot_cut.png",
+      "artifactName": "Microbot-Cut-Launcher-Setup-${version}.${ext}"
     },
     "mac": {
       "category": "public.app-category.utilities",
