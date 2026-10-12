@@ -55,7 +55,9 @@ function prepareClientRelease({
     publicKey,
     publishedAt = new Date().toISOString(),
     sourceCommit = null,
-    sourceDirty = null
+    sourceDirty = null,
+    // The live launcher entry, carried over unchanged so a client release never unpublishes it.
+    launcher = null
 }) {
     validateReleaseIdentity(version, sequence);
     if (!fs.statSync(sourceJar).isFile()) throw new Error('source JAR is not a file');
@@ -75,7 +77,7 @@ function prepareClientRelease({
             channel,
             sequence,
             publishedAt,
-            launcher: null,
+            launcher,
             client: {
                 version,
                 minimumLauncherVersion,
@@ -122,7 +124,8 @@ function prepareClientRollback({
     keyId,
     privateKeyPem,
     publicKey,
-    publishedAt = new Date().toISOString()
+    publishedAt = new Date().toISOString(),
+    launcher = null
 }) {
     const source = readAndVerifyBundle({
         outputDirectory: sourceDirectory,
@@ -147,7 +150,8 @@ function prepareClientRollback({
         publicKey,
         publishedAt,
         sourceCommit: source.metadata.sourceCommit,
-        sourceDirty: source.metadata.sourceDirty
+        sourceDirty: source.metadata.sourceDirty,
+        launcher
     });
     const preparedClient = prepared.payload.client;
     const sourceClient = source.payload.client;
