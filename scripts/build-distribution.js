@@ -85,8 +85,7 @@ function main() {
     const executable = executables.length === 1 ? executables[0] : executables.join(',');
     const versionInfo = spawnSync('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command',
-        '(Get-Item -LiteralPath $args[0]).VersionInfo.ProductName',
-        path.join(unpacked, executable)
+        `(Get-Item -LiteralPath '${path.join(unpacked, executable).replace(/'/g, "''")}').VersionInfo.ProductName`
     ], { encoding: 'utf8' });
     verifyInstallerIdentity({
         identity: profile.identity,
