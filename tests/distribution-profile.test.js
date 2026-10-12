@@ -86,6 +86,103 @@ describe('committed distribution profiles', () => {
     });
 });
 
+describe('installer identity and data isolation', () => {
+    test('production keeps exactly the identity the launcher always had', () => {
+        const production = lockedConfig('production');
+        for (const key of [
+            'appId', 'launcherName', 'shortcutName', 'dataDirectoryName',
+            'legacyDataDirectoryName', 'launcherDataDirectoryName'
+        ]) {
+            expect(production[key]).toBe(baseProductConfig[key]);
+        }
+        const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+        expect(packageJson.build.appId).toBe(production.appId);
+        expect(packageJson.build.productName).toBe(production.launcherName);
+        expect(production.distribution.clientHomeDirectoryName).toBeNull();
+        expect(production.distribution.userDataDirectoryName).toBeNull();
+    });
+
+    test('staging is clearly identified and shares no identity field with production', () => {
+        const staging = profile('staging').identity;
+        const production = profile('production').identity;
+        expect(staging.productName).toContain('Staging');
+        expect(staging.shortcutName).toContain('Staging');
+        expect(staging.appId).toMatch(/staging/);
+        for (const key of ['appId', 'productName', 'shortcutName', 'dataDirectoryName']) {
+            expect(staging[key]).not.toBe(production[key]);
+        }
+        expect(staging.legacyDataDirectoryName).toBeNull();
+        expect(staging.userDataDirectoryName).toBeTruthy();
+        expect(staging.clientHomeDirectoryName).toBeTruthy();
+    });
+
+    test.each([
+        ['staging reusing the production app id', 'staging', (p) => { p.identity.appId = 'com.microbotcut.launcher'; }, 'appId'],
+        ['staging reusing the production data directory', 'staging', (p) => { p.identity.dataDirectoryName = '.microbot-cut'; }, 'dataDirectoryName'],
+        ['staging importing the legacy directory', 'staging', (p) => { p.identity.legacyDataDirectoryName = '.microbot'; }, 'legacyDataDirectoryName'],
+        ['staging sharing the production Electron data', 'staging', (p) => { p.identity.userDataDirectoryName = null; }, 'userDataDirectoryName'],
+        ['staging without its own client home', 'staging', (p) => { p.identity.clientHomeDirectoryName = null; }, 'clientHomeDirectoryName'],
+        ['a missing identity', 'staging', (p) => { delete p.identity; }, 'profile.identity'],
+        ['production changing its app id', 'production', (p) => { p.identity.appId = 'com.microbotcut.launcher.staging'; }, 'appId'],
+        ['production changing its name', 'production', (p) => { p.identity.productName = 'Other'; }, 'productName']
+    ])('rejects %s', (_label, name, mutate, fragment) => {
+        expect(rejection(mutate, name)).toContain(fragment);
+    });
+
+    function dataLayout(name) {
+        let layout;
+        jest.isolateModules(() => {
+            jest.doMock('../libs/runtime-config', () => ({ getProductConfig: () => lockedConfig(name) }));
+            const dirModule = require('../libs/dir-module');
+            const home = path.join(os.tmpdir(), 'home-never-created');
+            layout = { ...dirModule.resolveDataDirectories(home), home, config: lockedConfig(name) };
+            layout.active = dirModule.resolveActiveDataDirectory(fs, layout.productDataDir, layout.legacyDataDir);
+        });
+        jest.dontMock('../libs/runtime-config');
+        return layout;
+    }
+
+    const disjoint = (a, b) => {
+        const down = path.relative(b, a);
+        const up = path.relative(a, b);
+        return (down.startsWith('..') || path.isAbsolute(down)) && (up.startsWith('..') || path.isAbsolute(up));
+    };
+
+    test('every persistent location of staging is disjoint from production', () => {
+        const staging = dataLayout('staging');
+        const production = dataLayout('production');
+        const stagingDirs = [
+            staging.productDataDir,
+            profileLib.clientHomeDirectory(staging.config, staging.productDataDir, path),
+            path.join('C:/AppData/Roaming', staging.config.distribution.userDataDirectoryName)
+        ];
+        const productionDirs = [
+            production.productDataDir,
+            production.legacyDataDir,
+            path.join(production.home, '.runelite'),
+            path.join('C:/AppData/Roaming', 'microbot-launcher')
+        ];
+        for (const a of stagingDirs) {
+            for (const b of productionDirs) expect(disjoint(a, b)).toBe(true);
+        }
+        expect(staging.legacyDataDir).toBeNull();
+        expect(staging.active).toBe(staging.productDataDir);
+        expect(production.active).toBe(production.legacyDataDir);
+    });
+
+    test('production data locations are unchanged', () => {
+        const production = dataLayout('production');
+        expect(production.productDataDir).toBe(path.join(production.home, '.microbot-cut'));
+        expect(production.legacyDataDir).toBe(path.join(production.home, '.microbot'));
+    });
+
+    test('only staging moves the client home', () => {
+        expect(profileLib.clientHomeDirectory(lockedConfig('production'), '/data', path)).toBeNull();
+        expect(profileLib.clientHomeDirectory(lockedConfig('staging'), '/data', path))
+            .toBe(path.join('/data', 'client-home'));
+    });
+});
+
 describe('profile validation fails closed', () => {
     test.each([
         ['a missing backend', (p) => { delete p.api; }, 'profile.api'],
@@ -165,7 +262,13 @@ describe('embedded profile', () => {
     test('a packaged build takes backend, channel and repository from the profile', () => {
         const config = lockedConfig('production');
         expect(config.productApiBaseUrl).toBe('https://cut.xulixnacc.online/api/v1');
-        expect(config.distribution).toEqual({ locked: true, environment: 'production', source: SOURCE });
+        expect(config.distribution).toEqual({
+            locked: true,
+            environment: 'production',
+            userDataDirectoryName: null,
+            clientHomeDirectoryName: null,
+            source: SOURCE
+        });
         expect(config.updateFilesBase).toBeNull();
         expect(config.updateApiBase).toBeNull();
     });

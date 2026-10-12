@@ -86,6 +86,75 @@ describe('beforePack hook', () => {
     });
 });
 
+describe('installer identity', () => {
+    const identityOf = (name) => profileLib.loadProfileSource({ fs, path, root, name }).identity;
+    const effectiveText = (identity) => [
+        `appId: ${identity.appId}`,
+        `productName: ${identity.productName}`,
+        'nsis:',
+        '  oneClick: false',
+        `  shortcutName: ${identity.shortcutName}`,
+        ''
+    ].join('\n');
+
+    test.each(['staging', 'production'])('%s builder arguments carry its identity', (name) => {
+        const identity = identityOf(name);
+        expect(build.identityBuilderArguments(identity)).toEqual([
+            `--config.appId=${identity.appId}`,
+            `--config.productName=${identity.productName}`,
+            `--config.nsis.shortcutName=${identity.shortcutName}`,
+            `--config.nsis.uninstallDisplayName=${identity.productName}`
+        ]);
+    });
+
+    test.each(['staging', 'production'])('accepts the %s effective configuration', (name) => {
+        const identity = identityOf(name);
+        expect(build.verifyInstallerIdentity({
+            effectiveConfigText: effectiveText(identity), identity, executableName: `${identity.productName}.exe`
+        })).toEqual({ appId: identity.appId, productName: identity.productName, shortcutName: identity.shortcutName });
+    });
+
+    test('rejects an installer built with the other environment identity', () => {
+        const staging = identityOf('staging');
+        const production = identityOf('production');
+        expect(() => build.verifyInstallerIdentity({
+            effectiveConfigText: effectiveText(production), identity: staging, executableName: `${staging.productName}.exe`
+        })).toThrow('appId');
+        expect(() => build.verifyInstallerIdentity({
+            effectiveConfigText: effectiveText(staging), identity: staging, executableName: `${production.productName}.exe`
+        })).toThrow('executable');
+    });
+
+    test('the Windows package does not list the macOS-only instructions', () => {
+        const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+        expect(packageJson.build.files.join('\n')).not.toMatch(/READ THIS BEFORE INSTALL/);
+        expect(packageJson.build.files.some((entry) => /^build\b/.test(entry))).toBe(false);
+    });
+});
+
+describe('macOS-only files', () => {
+    test('are rejected in the packed Windows app', async () => {
+        const profileText = profileLib.serializeEmbeddedProfile(
+            profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE);
+        await withTempDir(async (dir) => {
+            const app = path.join(dir, 'app');
+            fs.mkdirSync(path.join(app, 'node_modules', 'axios'), { recursive: true });
+            fs.mkdirSync(path.join(app, 'build'));
+            fs.writeFileSync(path.join(app, 'node_modules', 'axios', 'package.json'), '{}');
+            fs.writeFileSync(path.join(app, 'build', 'READ THIS BEFORE INSTALL.html'), '<html/>');
+            fs.writeFileSync(path.join(app, 'product-config.js'), 'module.exports = { updateFilesBase: null };');
+            fs.writeFileSync(path.join(app, profileLib.PROFILE_FILE), profileText);
+            fs.mkdirSync(path.join(dir, 'resources'));
+            const asarPath = path.join(dir, 'resources', 'app.asar');
+            await asar.createPackage(app, asarPath);
+            expect(() => build.verifyPackedApp({
+                asarApi: asar, asarPath, resourcesDirectory: path.join(dir, 'resources'),
+                expectedProfileText: profileText, dependencies: ['axios']
+            })).toThrow('macOS-only');
+        });
+    });
+});
+
 describe('embedProfile', () => {
     test('writes the profile, refuses a leftover and cleans up', () => withTempDir((dir) => {
         fs.mkdirSync(path.join(dir, 'config', 'distribution'), { recursive: true });

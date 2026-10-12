@@ -59,6 +59,18 @@ module.exports = async function (deps) {
         }
     }
     configuredProductVmArgs.push(...pluginRepository.args);
+    // The client hard-codes ~/.runelite under user.home. A staging launcher runs it with its own
+    // home so staging config, caches and plugins never mix with production's.
+    const { clientHomeDirectory } = require(path.join(__dirname, 'distribution-profile.js'));
+    const clientHome = clientHomeDirectory(
+        productConfig,
+        deps.productDataDir || microbotDir,
+        path
+    );
+    if (clientHome) {
+        fs.mkdirSync(path.join(clientHome, '.runelite'), { recursive: true });
+        configuredProductVmArgs.push(`-Duser.home=${clientHome}`);
+    }
     async function productVmArgsForLaunch() {
         if (typeof deps.productVmArgsForLaunch === 'function') {
             const selected = await deps.productVmArgsForLaunch({

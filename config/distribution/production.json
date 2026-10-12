@@ -1,6 +1,15 @@
 {
   "schemaVersion": 1,
   "environment": "production",
+  "identity": {
+    "appId": "com.microbotcut.launcher",
+    "productName": "Microbot Cut Launcher",
+    "shortcutName": "Microbot Cut Launcher",
+    "dataDirectoryName": ".microbot-cut",
+    "legacyDataDirectoryName": ".microbot",
+    "userDataDirectoryName": null,
+    "clientHomeDirectoryName": null
+  },
   "api": {
     "baseUrl": "https://cut.xulixnacc.online/api/v1"
   },

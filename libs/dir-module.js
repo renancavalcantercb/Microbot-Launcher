@@ -1,7 +1,8 @@
 const os = require('os');
 const path = require('path');
 const fsSync = require('fs');
-const productConfig = require('../product-config');
+const productConfig = require('./runtime-config').getProductConfig();
+const { clientHomeDirectory } = require('./distribution-profile');
 const {
     parseClientJar,
     isSafeClientVersion,
@@ -25,14 +26,15 @@ function resolveDataDirectories(homeDirectory) {
             homeDirectory,
             productConfig.dataDirectoryName
         ),
-        legacyDataDir: path.join(
-            homeDirectory,
-            productConfig.legacyDataDirectoryName
-        )
+        // null: this environment has no legacy data to import and never touches ~/.microbot.
+        legacyDataDir: productConfig.legacyDataDirectoryName
+            ? path.join(homeDirectory, productConfig.legacyDataDirectoryName)
+            : null
     };
 }
 
 function resolveActiveDataDirectory(fileSystem, productDirectory, legacyDirectory) {
+    if (!legacyDirectory) return productDirectory;
     const marker = path.join(productDirectory, IMPORT_MARKER);
     return fileSystem.existsSync(marker) ? productDirectory : legacyDirectory;
 }
@@ -45,9 +47,21 @@ const microbotDir = resolveActiveDataDirectory(
     productDataDir,
     legacyDataDir
 );
-const runeliteDir = path.join(homeDir, '.runelite');
+// The client hard-codes ~/.runelite under user.home; a staging launcher moves that home.
+const clientHome = clientHomeDirectory(productConfig, productDataDir, path);
+const runeliteDir = path.join(clientHome || homeDir, '.runelite');
 const clientLogs = path.join(runeliteDir, 'logs', 'client.log');
 const launcherLogs = () => {
+    if (productConfig.distribution?.userDataDirectoryName && process.platform === 'win32') {
+        return path.join(
+            homeDir,
+            'AppData',
+            'Roaming',
+            productConfig.distribution.userDataDirectoryName,
+            'logs',
+            'main.log'
+        );
+    }
     switch (process.platform) {
         case 'win32':
             return path.join(

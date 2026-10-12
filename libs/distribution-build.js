@@ -79,6 +79,9 @@ function packagesInAsar(entries) {
 // Checks what actually ended up in the packed app, not what the build intended to pack.
 function verifyPackedApp({ asarApi, asarPath, resourcesDirectory, expectedProfileText, dependencies }) {
     const entries = asarApi.listPackage(asarPath, { isPack: false }).map(normalizeAsarPath);
+    // The macOS-only install instructions must not ship in the Windows package.
+    const macOnly = entries.filter((entry) => /^build(\/|$)/i.test(entry) || /READ THIS BEFORE INSTALL/i.test(entry));
+    if (macOnly.length) throw new Error(`the packed app contains macOS-only files: ${macOnly.join(', ')}`);
     if (!entries.includes(PROFILE_FILE)) throw new Error('the packed app has no embedded distribution profile');
     const embedded = asarApi.extractFile(asarPath, PROFILE_FILE).toString('utf8');
     if (embedded !== expectedProfileText) throw new Error('the embedded distribution profile differs from the one that was built');
@@ -93,6 +96,48 @@ function verifyPackedApp({ asarApi, asarPath, resourcesDirectory, expectedProfil
     return { packageCount: packed.size, embeddedProfileSha256: sha256(Buffer.from(embedded, 'utf8')) };
 }
 
+// electron-builder writes the configuration it actually used; the installer identity is checked
+// there because it is not visible inside app.asar.
+function readEffectiveBuilderConfig(text) {
+    const value = (key) => {
+        const match = new RegExp(`^${key}: (.+)$`, 'm').exec(text);
+        return match ? match[1].trim().replace(/^['"]|['"]$/g, '') : null;
+    };
+    const shortcut = /^\s{2}shortcutName: (.+)$/m.exec(text);
+    return {
+        appId: value('appId'),
+        productName: value('productName'),
+        shortcutName: shortcut ? shortcut[1].trim().replace(/^['"]|['"]$/g, '') : null
+    };
+}
+
+function verifyInstallerIdentity({ effectiveConfigText, identity, executableName }) {
+    const effective = readEffectiveBuilderConfig(effectiveConfigText);
+    for (const [key, expected] of [
+        ['appId', identity.appId],
+        ['productName', identity.productName],
+        ['shortcutName', identity.shortcutName]
+    ]) {
+        if (effective[key] !== expected) {
+            throw new Error(`installer ${key} is ${JSON.stringify(effective[key])}, expected ${JSON.stringify(expected)}`);
+        }
+    }
+    if (executableName !== `${identity.productName}.exe`) {
+        throw new Error(`installed executable is ${executableName}, expected ${identity.productName}.exe`);
+    }
+    return effective;
+}
+
+// electron-builder overrides that give each installer its own Windows identity.
+function identityBuilderArguments(identity) {
+    return [
+        `--config.appId=${identity.appId}`,
+        `--config.productName=${identity.productName}`,
+        `--config.nsis.shortcutName=${identity.shortcutName}`,
+        `--config.nsis.uninstallDisplayName=${identity.productName}`
+    ];
+}
+
 function sha256(buffer) {
     return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -100,6 +145,21 @@ function sha256(buffer) {
 function effectiveChannelConfiguration(profile) {
     return {
         environment: profile.environment,
+        installer: {
+            appId: profile.identity.appId,
+            productName: profile.identity.productName,
+            shortcutName: profile.identity.shortcutName
+        },
+        dataDirectories: {
+            productData: `~/${profile.identity.dataDirectoryName}`,
+            legacyData: profile.identity.legacyDataDirectoryName ? `~/${profile.identity.legacyDataDirectoryName}` : null,
+            electronUserData: profile.identity.userDataDirectoryName
+                ? `%APPDATA%/${profile.identity.userDataDirectoryName}`
+                : 'default (legacy Electron name)',
+            clientHome: profile.identity.clientHomeDirectoryName
+                ? `~/${profile.identity.dataDirectoryName}/${profile.identity.clientHomeDirectoryName}`
+                : 'real user home'
+        },
         apiBaseUrl: profile.api.baseUrl,
         releaseChannel: profile.release.channel,
         releaseManifestUrl: profile.release.manifestUrl,
@@ -116,6 +176,9 @@ function effectiveChannelConfiguration(profile) {
 module.exports = {
     effectiveChannelConfiguration,
     embedProfile,
+    identityBuilderArguments,
+    readEffectiveBuilderConfig,
+    verifyInstallerIdentity,
     packagesInAsar,
     parseBuildArguments,
     requireDistributionProfile,

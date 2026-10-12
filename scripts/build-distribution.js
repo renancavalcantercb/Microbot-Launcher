@@ -6,7 +6,9 @@ const { spawnSync } = require('child_process');
 const {
     effectiveChannelConfiguration,
     embedProfile,
+    identityBuilderArguments,
     parseBuildArguments,
+    verifyInstallerIdentity,
     verifyPackedApp
 } = require('../libs/distribution-build');
 const {
@@ -61,7 +63,8 @@ function main() {
         const cli = require.resolve('electron-builder/cli.js');
         run(process.execPath, [
             cli, '--win', 'nsis', '--publish', 'never',
-            `--config.directories.output=${buildDirectory}`
+            `--config.directories.output=${buildDirectory}`,
+            ...identityBuilderArguments(profile.identity)
         ]);
     } finally {
         embedded.cleanup();
@@ -75,6 +78,14 @@ function main() {
         resourcesDirectory: resources,
         expectedProfileText: profileText,
         dependencies: Object.keys(packageJson.dependencies || {})
+    });
+
+    const unpacked = path.join(buildDirectory, 'win-unpacked');
+    const executables = fs.readdirSync(unpacked).filter((name) => name.toLowerCase().endsWith('.exe'));
+    verifyInstallerIdentity({
+        effectiveConfigText: fs.readFileSync(path.join(buildDirectory, 'builder-effective-config.yaml'), 'utf8'),
+        identity: profile.identity,
+        executableName: executables.length === 1 ? executables[0] : executables.join(',')
     });
 
     const fileName = installerFileName(version);

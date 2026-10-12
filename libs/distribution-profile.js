@@ -10,6 +10,32 @@ const PROFILE_SCHEMA_VERSION = 1;
 const PROFILE_NAMES = Object.freeze(['staging', 'production']);
 
 // Cross-environment guards: a staging profile can never point at production hosts or keys.
+// Windows identity of each installer. Production keeps the identity it always had. Staging has its
+// own app id, name, shortcuts and data locations, so both can be installed side by side and
+// neither install, uninstall nor stored data touches the other.
+const IDENTITIES = Object.freeze({
+    staging: Object.freeze({
+        appId: 'com.microbotcut.launcher.staging',
+        productName: 'Microbot Cut Launcher Staging',
+        shortcutName: 'Microbot Cut Launcher Staging',
+        dataDirectoryName: '.microbot-cut-staging',
+        legacyDataDirectoryName: null,
+        userDataDirectoryName: 'microbot-cut-launcher-staging',
+        // Relative to the data directory. The client hard-codes ~/.runelite, so the staging
+        // client runs with user.home pointed here to keep its config, caches and plugins apart.
+        clientHomeDirectoryName: 'client-home'
+    }),
+    production: Object.freeze({
+        appId: 'com.microbotcut.launcher',
+        productName: 'Microbot Cut Launcher',
+        shortcutName: 'Microbot Cut Launcher',
+        dataDirectoryName: '.microbot-cut',
+        legacyDataDirectoryName: '.microbot',
+        userDataDirectoryName: null,
+        clientHomeDirectoryName: null
+    })
+});
+
 const ENVIRONMENT_RULES = Object.freeze({
     staging: Object.freeze({
         apiOrigin: 'https://cut-staging.xulixnacc.online',
@@ -96,11 +122,16 @@ function validateSource(source) {
 }
 
 function validateProfile(raw, { requireSource = false } = {}) {
-    plainObject(raw, 'profile', ['schemaVersion', 'environment', 'api', 'release', 'pluginRepository', 'source']);
+    plainObject(raw, 'profile', ['schemaVersion', 'environment', 'identity', 'api', 'release', 'pluginRepository', 'source']);
     if (raw.schemaVersion !== PROFILE_SCHEMA_VERSION) fail(`profile.schemaVersion must be ${PROFILE_SCHEMA_VERSION}`);
     if (!PROFILE_NAMES.includes(raw.environment)) fail('profile.environment must be staging or production');
     const environment = raw.environment;
     const rules = ENVIRONMENT_RULES[environment];
+
+    const identity = plainObject(raw.identity, 'profile.identity', Object.keys(IDENTITIES[environment]));
+    for (const [key, expected] of Object.entries(IDENTITIES[environment])) {
+        if (identity[key] !== expected) fail(`profile.identity.${key} must be ${JSON.stringify(expected)}`);
+    }
 
     const api = plainObject(raw.api, 'profile.api', ['baseUrl']);
     const apiBaseUrl = requiredString(api, 'baseUrl', 'profile.api');
@@ -155,6 +186,7 @@ function validateProfile(raw, { requireSource = false } = {}) {
     return Object.freeze({
         schemaVersion: PROFILE_SCHEMA_VERSION,
         environment,
+        identity: Object.freeze({ ...IDENTITIES[environment] }),
         api: Object.freeze({ baseUrl: apiBaseUrl }),
         release: Object.freeze({
             channel: environment,
@@ -199,6 +231,7 @@ function serializeEmbeddedProfile(profile, source) {
     return `${JSON.stringify({
         schemaVersion: embedded.schemaVersion,
         environment: embedded.environment,
+        identity: embedded.identity,
         api: embedded.api,
         release: embedded.release,
         pluginRepository: embedded.pluginRepository,
@@ -220,6 +253,13 @@ function loadEmbeddedProfile({ fs, path, root }) {
 function applyDistributionProfile(productConfig, profile) {
     return Object.freeze({
         ...productConfig,
+        launcherName: profile.identity.productName,
+        shortcutName: profile.identity.shortcutName,
+        appId: profile.identity.appId,
+        dataDirectoryName: profile.identity.dataDirectoryName,
+        legacyDataDirectoryName: profile.identity.legacyDataDirectoryName,
+        launcherDataDirectoryName:
+            profile.identity.userDataDirectoryName || productConfig.launcherDataDirectoryName,
         productApiBaseUrl: profile.api.baseUrl,
         releaseUpdates: Object.freeze({
             enabled: true,
@@ -233,6 +273,8 @@ function applyDistributionProfile(productConfig, profile) {
         distribution: Object.freeze({
             locked: true,
             environment: profile.environment,
+            userDataDirectoryName: profile.identity.userDataDirectoryName,
+            clientHomeDirectoryName: profile.identity.clientHomeDirectoryName,
             source: profile.source || null
         })
     });
@@ -243,6 +285,12 @@ function applyDistributionProfile(productConfig, profile) {
 function resolveRuntimeProductConfig({ productConfig, isPackaged, fs, path, root }) {
     if (!isPackaged) return productConfig;
     return applyDistributionProfile(productConfig, loadEmbeddedProfile({ fs, path, root }));
+}
+
+// Directory used as the client's user.home, or null when the client keeps the real home.
+function clientHomeDirectory(productConfig, productDataDir, path) {
+    const name = productConfig?.distribution?.clientHomeDirectoryName;
+    return name ? path.join(productDataDir, name) : null;
 }
 
 function isLocked(productConfig) {
@@ -262,10 +310,12 @@ function launchEnvironmentFor(productConfig, environment) {
 module.exports = {
     DistributionProfileError,
     ENVIRONMENT_RULES,
+    IDENTITIES,
     PROFILE_FILE,
     PROFILE_NAMES,
     PROFILE_SCHEMA_VERSION,
     applyDistributionProfile,
+    clientHomeDirectory,
     isLocked,
     launchEnvironmentFor,
     loadEmbeddedProfile,

@@ -1,6 +1,15 @@
 {
   "schemaVersion": 1,
   "environment": "staging",
+  "identity": {
+    "appId": "com.microbotcut.launcher.staging",
+    "productName": "Microbot Cut Launcher Staging",
+    "shortcutName": "Microbot Cut Launcher Staging",
+    "dataDirectoryName": ".microbot-cut-staging",
+    "legacyDataDirectoryName": null,
+    "userDataDirectoryName": "microbot-cut-launcher-staging",
+    "clientHomeDirectoryName": "client-home"
+  },
   "api": {
     "baseUrl": "https://cut-staging.xulixnacc.online/api/v1"
   },

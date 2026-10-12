@@ -760,7 +760,15 @@ module.exports = async function (deps) {
      * so that the frontend can populate the profile select element
      */
     ipcMain.handle('list-profiles', async () => {
-        const user = process.env.USERPROFILE || process.env.HOME;
+        const { clientHomeDirectory } = require(path.join(
+            projectDir,
+            'libs',
+            'distribution-profile.js'
+        ));
+        const user =
+            clientHomeDirectory(productConfig, productDataDir || microbotDir, path) ||
+            process.env.USERPROFILE ||
+            process.env.HOME;
         const profilesPath = path.join(
             user,
             '.runelite',

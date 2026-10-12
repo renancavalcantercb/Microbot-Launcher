@@ -571,6 +571,107 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
         }
     });
 
+    describe('distributed launcher: client home and JAVA_TOOL_OPTIONS', () => {
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+
+        function lockedConfigFor(name) {
+            const profileLib = require('../libs/distribution-profile');
+            const profile = profileLib.loadProfileSource({ fs, path, root: path.join(__dirname, '..'), name });
+            return {
+                profile,
+                config: profileLib.applyDistributionProfile(
+                    require('../product-config'),
+                    { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' } }
+                )
+            };
+        }
+
+        async function launchLocked(name) {
+            const { profile, config } = lockedConfigFor(name);
+            const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'locked-data-'));
+            const harness = fakeRuntimeHarness(probeOutput);
+            harness.deps.productConfig = config;
+            harness.deps.productDataDir = dataDir;
+            await launch(harness);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return { profile, dataDir, call: harness.spawnCalls[1] };
+        }
+
+        test('staging runs the client with its own user.home, production keeps the real one', async () => {
+            const staging = await launchLocked('staging');
+            const production = await launchLocked('production');
+            try {
+                const home = path.join(staging.dataDir, 'client-home');
+                expect(staging.call.args).toContain(`-Duser.home=${home}`);
+                expect(fs.existsSync(path.join(home, '.runelite'))).toBe(true);
+                expect(production.call.args.some((arg) => arg.startsWith('-Duser.home='))).toBe(false);
+            } finally {
+                fs.rmSync(staging.dataDir, { recursive: true, force: true });
+                fs.rmSync(production.dataDir, { recursive: true, force: true });
+            }
+        });
+
+        // JAVA_TOOL_OPTIONS is read by the JVM before the command line, and a -D on the command line
+        // wins. Every property the client reads for its plugin repository is therefore pinned by the
+        // launcher, and the backend authorization inputs (ticket, broker) never travel as JVM
+        // properties at all: the client reads them from the environment the launcher builds.
+        test.each(['staging', 'production'])('JAVA_TOOL_OPTIONS cannot redirect the %s repository or authorization', async (name) => {
+            const original = {
+                JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS,
+                JDK_JAVA_OPTIONS: process.env.JDK_JAVA_OPTIONS,
+                _JAVA_OPTIONS: process.env._JAVA_OPTIONS
+            };
+            const hostile = [
+                '-Dmicrobot.plugins.repository.enabled=false',
+                '-Dmicrobot.plugins.manifestUrl=https://evil.example/catalog.json',
+                '-Dmicrobot.plugins.releasesUrl=https://evil.example/',
+                '-Dmicrobot.plugins.releasesApiUrl=https://evil.example/api',
+                '-Dmicrobot.plugins.publicKey=AAAA',
+                '-Dmicrobot.plugins.publicKeyId=evil-key',
+                '-Dmicrobot.plugins.developmentMode=true',
+                '-Dmicrobot.plugins.developmentArtifact=C:\\evil.jar',
+                '-Dmicrobot.plugins.developmentArtifactName=Evil.jar'
+            ].join(' ');
+            process.env.JAVA_TOOL_OPTIONS = hostile;
+            process.env.JDK_JAVA_OPTIONS = hostile;
+            process.env._JAVA_OPTIONS = hostile;
+            let result;
+            try {
+                result = await launchLocked(name);
+            } finally {
+                for (const [key, value] of Object.entries(original)) {
+                    if (value === undefined) delete process.env[key];
+                    else process.env[key] = value;
+                }
+            }
+            try {
+                const args = result.call.args;
+                const jarIndex = args.indexOf('-jar');
+                expect(jarIndex).toBeGreaterThan(0);
+                const pinned = (property) => args.slice(0, jarIndex).filter((arg) => arg.startsWith(`-D${property}=`));
+                const repository = result.profile.pluginRepository;
+                expect(pinned('microbot.plugins.repository.enabled')).toEqual(['-Dmicrobot.plugins.repository.enabled=true']);
+                expect(pinned('microbot.plugins.manifestUrl')).toEqual([`-Dmicrobot.plugins.manifestUrl=${repository.manifestUrl}`]);
+                expect(pinned('microbot.plugins.releasesUrl')).toEqual([`-Dmicrobot.plugins.releasesUrl=${repository.releasesUrl}`]);
+                expect(pinned('microbot.plugins.releasesApiUrl')).toEqual(['-Dmicrobot.plugins.releasesApiUrl=']);
+                expect(pinned('microbot.plugins.publicKey')).toEqual([`-Dmicrobot.plugins.publicKey=${repository.publicKey}`]);
+                expect(pinned('microbot.plugins.publicKeyId')).toEqual([`-Dmicrobot.plugins.publicKeyId=${repository.publicKeyId}`]);
+                // developmentArtifact* are read only when developmentMode is true, which is pinned false.
+                expect(pinned('microbot.plugins.developmentMode')).toEqual(['-Dmicrobot.plugins.developmentMode=false']);
+                // Authorization inputs are environment variables only, never JVM properties.
+                expect(args.join(' ')).not.toMatch(/ticket|MICROBOT_CUT_CLIENT|broker|header\.payload/i);
+                expect(result.call.options.env.MICROBOT_CUT_CLIENT_TICKET).toBe('header.payload.signature');
+            } finally {
+                fs.rmSync(result.dataDir, { recursive: true, force: true });
+            }
+        });
+    });
+
     test('an unparseable Java version warns and still launches', async () => {
         const harness = fakeRuntimeHarness('    java.vendor = Mystery\n    sun.arch.data.model = 64\nmystery version "banana"\n');
         await launch(harness, { ram: '1g' });
