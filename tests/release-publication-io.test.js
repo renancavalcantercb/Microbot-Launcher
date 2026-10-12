@@ -60,6 +60,15 @@ describe('release publication I/O', () => {
         });
     });
 
+    describe('tracked configurations', () => {
+        test.each(['staging', 'production'])('%s sets the launcher minimum apart from the client minimum', (name) => {
+            const config = io.loadConfiguration(path.join(io.launcherRoot, 'config', `release-publication.${name}.json`));
+            expect(config.channel).toBe(name);
+            expect(config.minimumSupportedLauncherVersion).toBe('3.2.11');
+            expect(config.minimumLauncherVersion).toBe('3.2.10');
+        });
+    });
+
     describe('wrangler wrapper', () => {
         const config = () => ({ bucket: 'bucket-staging', backendRepository: path.join(directory, 'backend') });
         const installWrangler = () => {

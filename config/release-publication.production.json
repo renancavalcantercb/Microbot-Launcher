@@ -7,6 +7,7 @@
   "privateKeyFile": "../.secrets/release-production-2026-01.pem",
   "publicKeyFile": "release-production-2026-01.public.json",
   "minimumLauncherVersion": "3.2.10",
+  "minimumSupportedLauncherVersion": "3.2.11",
   "clientRepository": "../../Microbot",
   "backendRepository": "../../microbot-cut-backend",
   "gradleUserHome": "../../.gradle-final",
