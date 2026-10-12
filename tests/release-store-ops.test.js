@@ -64,6 +64,25 @@ describe('release store operations', () => {
         });
     });
 
+    describe('choosing the sequence', () => {
+        test('is live + 1 unless that candidate key is taken, and lists what it skipped', async () => {
+            memory.seed(BUCKET, ops.manifestKey('staging'), manifestBytes(4));
+            const live = await ops.readLiveManifest(store, config);
+            expect(await ops.nextFreeSequence(store, 'staging', live)).toEqual({ sequence: 5, skipped: [] });
+            memory.seed(BUCKET, ops.candidateKey('staging', 5), Buffer.from('x'));
+            memory.seed(BUCKET, ops.candidateKey('staging', 6), Buffer.from('x'));
+            expect(await ops.nextFreeSequence(store, 'staging', live)).toEqual({ sequence: 7, skipped: [5, 6] });
+            // a candidate below the live sequence is history, not an obstacle
+            memory.seed(BUCKET, ops.candidateKey('staging', 3), Buffer.from('x'));
+            expect((await ops.nextFreeSequence(store, 'staging', live)).sequence).toBe(7);
+        });
+
+        test('a channel without a manifest starts at 1, and only reads R2', async () => {
+            expect(await ops.nextFreeSequence(store, 'staging', null)).toEqual({ sequence: 1, skipped: [] });
+            expect(memory.writes()).toEqual([]);
+        });
+    });
+
     describe('bundle base', () => {
         const metadataOf = (overrides) => ({ base: { etag: '"e"', sequence: 4 }, ...overrides });
 

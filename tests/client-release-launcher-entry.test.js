@@ -198,6 +198,21 @@ describe('client publication CLI', () => {
             expect(bundle(6).metadata.base.sequence).toBe(5);
         });
 
+        test('a preserved bundle without a base still works as a rollback source', async () => {
+            await cli.prepare(config, { version: VERSION, 'skip-build': true });
+            await cli.stage(config, options(5));
+            await cli.promote(config, promoteOptions(5));
+            const file = path.join(bundleDirectory(cli.deps.workRoot, 'staging', VERSION, 5), 'release.json');
+            const { base, ...legacy } = JSON.parse(fs.readFileSync(file, 'utf8'));
+            fs.writeFileSync(file, JSON.stringify(legacy));
+            await cli.prepareRollback(config, { version: VERSION, 'source-sequence': 5 });
+            expect(bundle(6).payload.client.sha256).toBe(bundle(5).payload.client.sha256);
+            expect(bundle(6).metadata.base).toEqual({ etag: memory.etag(BUCKET, MANIFEST), sequence: 5 });
+            await cli.stage(config, options(6));
+            await cli.promote(config, promoteOptions(6));
+            expect(liveOf().sequence).toBe(6);
+        });
+
         test('a bundle prepared before bases were recorded is refused', async () => {
             await cli.prepare(config, { version: VERSION, 'skip-build': true });
             const file = path.join(bundleDirectory(cli.deps.workRoot, 'staging', VERSION, 5), 'release.json');
@@ -269,6 +284,41 @@ describe('client publication CLI', () => {
             expect(puts().filter((entry) => entry.key === artifact)).toHaveLength(1);
         });
 
+        test('refuses a JAR above the single-request upload limit before any write', async () => {
+            const limit = ops.MAX_SINGLE_PUT_BYTES;
+            ops.MAX_SINGLE_PUT_BYTES = 5;
+            try {
+                await expect(cli.stage(config, options(5))).rejects.toThrow(/single-request upload limit/);
+            } finally {
+                ops.MAX_SINGLE_PUT_BYTES = limit;
+            }
+            expect(puts()).toEqual([]);
+        });
+
+        describe('an abandoned staged candidate does not block the channel', () => {
+            test('the next prepare skips the sequence whose candidate is already in R2', async () => {
+                await cli.stage(config, options(5));
+                output.length = 0;
+                await cli.prepare(config, { version: VERSION, 'skip-build': true });
+                expect(bundle(6).payload.sequence).toBe(6);
+                expect(bundle(6).metadata.base.sequence).toBe(4);
+                expect(output.join('')).toContain('Sequence: 6 (live sequence 4 + 1, skipping 5: a candidate is already staged in R2)');
+                await cli.stage(config, options(6, { resume: true }));
+                await cli.promote(config, promoteOptions(6));
+                expect(liveOf().sequence).toBe(6);
+                expect(liveOf().client.version).toBe(VERSION);
+            });
+
+            test('a candidate whose read-back failed is left alone and the re-prepare goes around it', async () => {
+                memory.corruptNext((key) => key.includes('/candidates/'));
+                await expect(cli.stage(config, options(5))).rejects.toThrow(/read-back .* failed size or SHA-256/);
+                await cli.prepare(config, { version: VERSION, 'skip-build': true });
+                await cli.stage(config, options(6, { resume: true }));
+                await cli.promote(config, promoteOptions(6));
+                expect(liveOf().sequence).toBe(6);
+            });
+        });
+
         test('refuses, before any write, when the channel moved on after prepare', async () => {
             seedManifest({ sequence: 5, launcher: NEWER_LAUNCHER });
             const error = await cli.stage(config, options(5)).catch((failure) => failure);
@@ -338,16 +388,28 @@ describe('client publication CLI', () => {
             expect(puts()).toHaveLength(1);
         });
 
-        test('two client releases prepared from the same base: the second cannot stage over the first, and cannot be promoted after it', async () => {
-            // both prepares computed sequence 5; they share the candidate key of that sequence
+        test('a second client release prepared while the first is staged goes around its candidate, and cannot outlive its promotion', async () => {
+            // sequence 5 is taken by the staged p17 candidate, so p18 is prepared as sequence 6 from the same base
             await cli.prepare(config, { version: 'cut-2.6.30-p18', 'skip-build': true });
-            const second = { version: 'cut-2.6.30-p18', sequence: 5 };
-            await expect(cli.stage(config, second)).rejects.toThrow(/differs from the local bundle; it is never overwritten/);
+            const second = { version: 'cut-2.6.30-p18', sequence: 6 };
             await cli.promote(config, promoteOptions(5));
             memory.log.length = 0;
+            await expect(cli.stage(config, second)).rejects.toThrow(/changed after this bundle was prepared/);
             await expect(cli.promote(config, { ...second, 'confirm-promote': true })).rejects.toThrow(/changed after this bundle was prepared/);
             expect(puts()).toEqual([]);
             expect(liveOf().client.version).toBe(VERSION);
+        });
+
+        test('two client releases prepared before either is staged compute the same sequence: only one can stage it', async () => {
+            const publisher = async (version) => {
+                await cli.prepare(config, { version, 'skip-build': true });
+            };
+            memory.delete(BUCKET, 'releases/staging/candidates/sequence-5-manifest.json');
+            await publisher('cut-2.6.30-p18');
+            await publisher('cut-2.6.30-p19');
+            const third = { version: 'cut-2.6.30-p19', sequence: 5 };
+            await cli.stage(config, { version: 'cut-2.6.30-p18', sequence: 5 });
+            await expect(cli.stage(config, third)).rejects.toThrow(/differs from the local bundle; it is never overwritten/);
         });
 
         test('refuses when the artifact or the candidate is not staged, or is not the bundle', async () => {

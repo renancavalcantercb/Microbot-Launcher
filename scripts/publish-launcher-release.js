@@ -231,11 +231,29 @@ async function checkAgainstLive(config, options, bundle, live) {
 // The state every prepare is based on: the live manifest in R2 itself, with its ETag. The next
 // sequence is computed from it. A launcher needs the client entry the manifest already has.
 async function prepareContext(config) {
-    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
+    const store = deps.openStore(config, { writable: false });
+    const live = await ops.readLiveManifest(store, config);
     if (!live) {
         throw new Error('this channel has no live manifest; publish a client release first (the manifest requires a client entry)');
     }
-    return live;
+    const { sequence, skipped } = await ops.nextFreeSequence(store, config.channel, live);
+    return { live, sequence, skipped, store };
+}
+
+// `latest.yml` carries a release date and is immutable once staged under its version. A release that
+// was staged and abandoned leaves its `latest.yml` behind, and a new prepare of the same installer
+// would stamp a new date and be refused at stage as "differs". The date of the staged file is reused
+// when it belongs to exactly this installer, so the re-prepared bundle matches what is already there.
+// A staged file for other bytes is ignored here and refused at stage, as it must be.
+async function stagedReleaseDate(store, version, sha512Base64) {
+    const staged = await store.get(launcherRelease.launcherObjectKeys(version).updater);
+    if (!staged.found) return null;
+    try {
+        const parsed = launcherRelease.parseUpdaterMetadata(staged.bytes.toString('utf8'));
+        return parsed.version === version && parsed.sha512 === sha512Base64 ? parsed.releaseDate : null;
+    } catch (_) {
+        return null;
+    }
 }
 
 function recordBaseOrDiscard(directory, live) {
@@ -247,8 +265,9 @@ function recordBaseOrDiscard(directory, live) {
     }
 }
 
-const baseLine = (live, sequence) =>
-    `Sequence: ${sequence} (live sequence ${live.payload.sequence} + 1)\n` +
+const baseLine = (live, sequence, skipped = []) =>
+    `Sequence: ${sequence} (live sequence ${live.payload.sequence} + 1` +
+    `${skipped.length ? `, skipping ${skipped.join(', ')}: a candidate is already staged in R2` : ''})\n` +
     `Based on live ETag: ${live.etag}\n`;
 
 async function prepare(config, options) {
@@ -269,8 +288,7 @@ async function prepare(config, options) {
         });
     }
 
-    const live = await prepareContext(config);
-    const sequence = ops.nextSequence(live);
+    const { live, sequence, skipped, store } = await prepareContext(config);
     launcherRelease.requireNewerLauncherVersion({ launcher: { version: options.version } }, live.payload);
     if (stagingCandidate) {
         const stagingLive = await deps.liveManifest(loadStagingConfiguration(options), { allowMissing: true });
@@ -294,8 +312,10 @@ async function prepare(config, options) {
         options.version,
         sequence
     );
+    const releaseDate = await stagedReleaseDate(store, options.version, candidate.sha512Base64);
     const result = launcherRelease.prepareLauncherRelease({
         installerPath,
+        ...(releaseDate ? { releaseDate } : {}),
         outputDirectory,
         channel: config.channel,
         version: options.version,
@@ -313,19 +333,19 @@ async function prepare(config, options) {
     const entry = result.payload.launcher.platforms[launcherRelease.LAUNCHER_PLATFORM];
     process.stdout.write(
         `Prepared launcher ${options.version} for ${config.channel}\n` +
-        baseLine(live, sequence) +
+        baseLine(live, sequence, skipped) +
         `Size: ${entry.size} bytes\n` +
         `SHA-256: ${entry.sha256}\n` +
         `Source commit: ${candidate.sourceCommit}\n` +
         `Minimum supported launcher: ${minimumSupportedVersion} (from ${minimumSource})\n` +
         `Client entry carried over: ${live.payload.client.version}\n` +
+        (releaseDate ? 'latest.yml reuses the release date of the one already staged in R2 for this installer\n' : '') +
         `Bundle: ${outputDirectory}\n`
     );
 }
 
 async function prepareRollback(config, options) {
-    const live = await prepareContext(config);
-    const sequence = ops.nextSequence(live);
+    const { live, sequence, skipped } = await prepareContext(config);
     const outputDirectory = launcherRelease.launcherBundleDirectory(deps.workRoot, config.channel, options.version, sequence);
     const result = launcherRelease.prepareLauncherRollback({
         sourceDirectory: launcherRelease.launcherBundleDirectory(deps.workRoot, config.channel, options.version, options['source-sequence']),
@@ -340,7 +360,7 @@ async function prepareRollback(config, options) {
     recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
         `Prepared launcher rollback to ${options.version}\n` +
-        baseLine(live, sequence) +
+        baseLine(live, sequence, skipped) +
         `Reused sequence: ${result.source.payload.sequence}\n` +
         `Client entry carried over: ${live.payload.client.version}\n` +
         'It does not downgrade launchers that are already installed; it changes what the Download page serves.\n'
@@ -348,8 +368,7 @@ async function prepareRollback(config, options) {
 }
 
 async function prepareWithdraw(config, options) {
-    const live = await prepareContext(config);
-    const sequence = ops.nextSequence(live);
+    const { live, sequence, skipped } = await prepareContext(config);
     const outputDirectory = launcherRelease.launcherWithdrawalDirectory(deps.workRoot, config.channel, sequence);
     launcherRelease.prepareLauncherWithdrawal({
         outputDirectory,
@@ -363,7 +382,7 @@ async function prepareWithdraw(config, options) {
     recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
         'Prepared launcher withdrawal: the Download page will report the installer as unavailable.\n' +
-        baseLine(live, sequence)
+        baseLine(live, sequence, skipped)
     );
 }
 

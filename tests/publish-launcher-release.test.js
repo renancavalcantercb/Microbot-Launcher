@@ -812,6 +812,19 @@ describe('launcher publication CLI', () => {
             expect(output.join('')).toContain('does not downgrade launchers that are already installed');
         });
 
+        test('a preserved bundle without a base still works as a rollback source', async () => {
+            await publishLauncher(5, '3.2.11', crypto.randomBytes(1024));
+            await publishLauncher(6, '3.2.12', crypto.randomBytes(1024));
+            const file = path.join(launcherRelease.launcherBundleDirectory(cli.deps.workRoot, 'staging', '3.2.11', 5), 'release.json');
+            const { base, ...legacy } = JSON.parse(fs.readFileSync(file, 'utf8'));
+            fs.writeFileSync(file, JSON.stringify(legacy));
+            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5 });
+            expect(readBundle('staging', { sequence: 7 }).metadata.base.sequence).toBe(6);
+            await cli.stage(config('staging'), { version: '3.2.11', sequence: 7 });
+            await cli.promote(config('staging'), { version: '3.2.11', sequence: 7, 'confirm-promote': true });
+            expect(liveOf('staging').launcher.version).toBe('3.2.11');
+        });
+
         test('a rollback needs the old objects to still be in R2', async () => {
             await publishLauncher(5, '3.2.11', crypto.randomBytes(1024));
             await publishLauncher(6, '3.2.12', crypto.randomBytes(1024));
@@ -1049,6 +1062,74 @@ describe('launcher publication CLI', () => {
                 cli.deps.workRoot = workA;
                 fs.rmSync(machineB, { recursive: true, force: true });
             }
+        });
+
+        describe('an abandoned staged candidate does not block the channel', () => {
+            test('the next prepare skips the sequence whose candidate is already in R2 and publishes at the next one', async () => {
+                await cli.stage(config('staging'), releaseOptions('staging'));
+                expect(memory.has('bucket-staging', 'releases/staging/candidates/sequence-5-manifest.json')).toBe(true);
+                // the release is not promoted; the operator prepares again (a new bundle, new bytes)
+                output.length = 0;
+                await cli.prepare(config('staging'), prepareOptions('staging'));
+                const next = readBundle('staging', { sequence: 6 });
+                expect(next.payload.sequence).toBe(6);
+                expect(next.metadata.base.sequence).toBe(4);
+                expect(output.join('')).toContain('Sequence: 6 (live sequence 4 + 1, skipping 5: a candidate is already staged in R2)');
+                // latest.yml is immutable under its version, so the re-prepared one is byte-identical to the staged one
+                expect(output.join('')).toContain('latest.yml reuses the release date');
+                expect(fs.readFileSync(next.updaterFile).equals(memory.bytes('bucket-staging', KEYS.updater))).toBe(true);
+                memory.log.length = 0;
+                await cli.stage(config('staging'), releaseOptions('staging', { sequence: 6, resume: true }));
+                await cli.promote(config('staging'), promoteOptions('staging', { sequence: 6 }));
+                expect(liveOf('staging').sequence).toBe(6);
+                expect(memory.bytes('bucket-staging', 'releases/staging/candidates/sequence-5-manifest.json')).not.toBeNull();
+            });
+
+            test('a candidate whose read-back failed is left alone and the re-prepare goes around it', async () => {
+                memory.corruptNext((key) => key.includes('/candidates/'));
+                await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/read-back .* failed size or SHA-256/);
+                await cli.prepare(config('staging'), prepareOptions('staging'));
+                expect(readBundle('staging', { sequence: 6 }).payload.sequence).toBe(6);
+                await cli.stage(config('staging'), releaseOptions('staging', { sequence: 6, resume: true }));
+                await cli.promote(config('staging'), promoteOptions('staging', { sequence: 6 }));
+                expect(liveOf('staging').sequence).toBe(6);
+            });
+
+            test('a staged latest.yml for other bytes is not reused, and stage refuses it', async () => {
+                await cli.stage(config('staging'), releaseOptions('staging'));
+                const staged = memory.bytes('bucket-staging', KEYS.updater).toString('utf8');
+                memory.seed('bucket-staging', KEYS.updater, Buffer.from(staged.replace(/sha512: [A-Za-z0-9+/]{86}==/g, `sha512: ${'A'.repeat(86)}==`)));
+                output.length = 0;
+                await cli.prepare(config('staging'), prepareOptions('staging'));
+                expect(output.join('')).not.toContain('latest.yml reuses');
+                await expect(cli.stage(config('staging'), releaseOptions('staging', { sequence: 6, resume: true })))
+                    .rejects.toThrow(/differs from the local bundle; it is never overwritten/);
+            });
+
+            test('rollback and withdrawal skip taken candidate keys too', async () => {
+                await cli.stage(config('staging'), releaseOptions('staging'));
+                await cli.promote(config('staging'), promoteOptions('staging'));
+                // someone staged a candidate for sequence 6 and walked away
+                memory.seed('bucket-staging', 'releases/staging/candidates/sequence-6-manifest.json', Buffer.from('abandoned'));
+                await cli.prepareWithdraw(config('staging'), {});
+                const directory7 = launcherRelease.launcherWithdrawalDirectory(cli.deps.workRoot, 'staging', 7);
+                expect(fs.existsSync(directory7)).toBe(true);
+            });
+
+            test('lists every sequence it skipped and gives up on an absurd run of taken keys', async () => {
+                for (const sequence of [5, 6, 7]) {
+                    memory.seed('bucket-staging', `releases/staging/candidates/sequence-${sequence}-manifest.json`, Buffer.from('x'));
+                }
+                output.length = 0;
+                await cli.prepare(config('staging'), prepareOptions('staging'));
+                expect(readBundle('staging', { sequence: 8 }).payload.sequence).toBe(8);
+                expect(output.join('')).toContain('skipping 5, 6, 7');
+                for (let sequence = 8; sequence < 8 + 100; sequence += 1) {
+                    memory.seed('bucket-staging', `releases/staging/candidates/sequence-${sequence}-manifest.json`, Buffer.from('x'));
+                }
+                fs.rmSync(path.join(cli.deps.workRoot, 'staging'), { recursive: true, force: true });
+                await expect(cli.prepare(config('staging'), prepareOptions('staging'))).rejects.toThrow(/candidate keys are already taken/);
+            });
         });
 
         test('the candidate key is shared by both prepares, so a stage that races the other one is refused by R2', async () => {

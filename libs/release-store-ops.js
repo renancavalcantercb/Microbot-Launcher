@@ -52,6 +52,30 @@ function nextSequence(live) {
     return live ? live.payload.sequence + 1 : 1;
 }
 
+const candidateKey = (channel, sequence) => `releases/${channel}/candidates/sequence-${sequence}-manifest.json`;
+const MAX_SKIPPED_SEQUENCES = 100;
+
+// The sequence a new release gets: the first one above the live sequence whose candidate key is still
+// free in R2. A candidate that was staged and never promoted (a bad build, a changed minimum, a failed
+// read-back) keeps its key forever, because staged objects are immutable; without skipping it, every
+// later prepare would compute the same sequence and be refused at stage. Gaps are harmless: a launcher
+// only rejects a manifest older than the highest it accepted. The base stays the live manifest.
+async function nextFreeSequence(store, channel, live) {
+    const skipped = [];
+    let sequence = nextSequence(live);
+    while ((await store.head(candidateKey(channel, sequence))).found) {
+        skipped.push(sequence);
+        if (skipped.length >= MAX_SKIPPED_SEQUENCES) {
+            throw new Error(
+                `${MAX_SKIPPED_SEQUENCES} candidate keys are already taken above the live sequence; ` +
+                `look at releases/${channel}/candidates/ before publishing`
+            );
+        }
+        sequence += 1;
+    }
+    return { sequence, skipped };
+}
+
 function describeLive(live) {
     if (!live) return 'there is no live manifest';
     const { payload } = live;
@@ -220,6 +244,8 @@ async function probeConditionalWrites(store, channel, id = crypto.randomUUID()) 
 }
 
 module.exports = {
+    candidateKey,
+    nextFreeSequence,
     probeConditionalWrites,
     MANIFEST_CONTENT_TYPE,
     MAX_SINGLE_PUT_BYTES,

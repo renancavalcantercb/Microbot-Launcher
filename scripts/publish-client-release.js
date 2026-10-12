@@ -157,8 +157,9 @@ function recordBaseOrDiscard(directory, live) {
     }
 }
 
-const baseLine = (live, sequence) =>
-    `Sequence: ${sequence} (${live ? `live sequence ${live.payload.sequence} + 1` : 'no live manifest yet'})\n` +
+const baseLine = (live, sequence, skipped = []) =>
+    `Sequence: ${sequence} (${live ? `live sequence ${live.payload.sequence} + 1` : 'no live manifest yet'}` +
+    `${skipped.length ? `, skipping ${skipped.join(', ')}: a candidate is already staged in R2` : ''})\n` +
     `Based on live ETag: ${live ? live.etag : 'none (the manifest does not exist yet)'}\n`;
 
 async function prepare(config, options) {
@@ -169,8 +170,9 @@ async function prepare(config, options) {
     if (!options['skip-build']) deps.runGradleBuild(config);
     // The live manifest is read after the build, which can take minutes, so the base is current. A
     // client release must not unpublish the launcher: the live entry is carried over unchanged.
-    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
-    const sequence = ops.nextSequence(live);
+    const store = deps.openStore(config, { writable: false });
+    const live = await ops.readLiveManifest(store, config);
+    const { sequence, skipped } = await ops.nextFreeSequence(store, config.channel, live);
     const sourceJar = path.resolve(launcherRoot, options['source-jar'] || config.sourceJar);
     const outputDirectory = bundleDirectory(
         deps.workRoot,
@@ -195,7 +197,7 @@ async function prepare(config, options) {
     recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
         `Prepared ${options.version}\n` +
-        baseLine(live, sequence) +
+        baseLine(live, sequence, skipped) +
         `Size: ${result.payload.client.size} bytes\n` +
         `SHA-256: ${result.payload.client.sha256}\n` +
         `Bundle: ${outputDirectory}\n`
@@ -203,8 +205,9 @@ async function prepare(config, options) {
 }
 
 async function prepareRollback(config, options) {
-    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
-    const sequence = ops.nextSequence(live);
+    const store = deps.openStore(config, { writable: false });
+    const live = await ops.readLiveManifest(store, config);
+    const { sequence, skipped } = await ops.nextFreeSequence(store, config.channel, live);
     const sourceDirectory = bundleDirectory(
         deps.workRoot,
         config.channel,
@@ -230,7 +233,7 @@ async function prepareRollback(config, options) {
     recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
         `Prepared rollback to ${options.version}\n` +
-        baseLine(live, sequence) +
+        baseLine(live, sequence, skipped) +
         `Reused sequence: ${result.source.payload.sequence}\n` +
         `SHA-256: ${result.payload.client.sha256}\n` +
         `Bundle: ${outputDirectory}\n`
@@ -241,6 +244,9 @@ async function stage(config, options) {
     const bundle = releaseBundle(config, options);
     if (bundle.metadata.sourceDirty) {
         throw new Error('refusing to stage a release prepared from an uncommitted client worktree');
+    }
+    if (!bundle.metadata.reusesArtifact && bundle.payload.client.size > ops.MAX_SINGLE_PUT_BYTES) {
+        throw new Error(`the client JAR is larger than the ${ops.MAX_SINGLE_PUT_BYTES}-byte single-request upload limit`);
     }
     const dryRun = Boolean(options['dry-run']);
     const store = deps.openStore(config, { writable: !dryRun });
