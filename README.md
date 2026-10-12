@@ -23,7 +23,7 @@ Run the private Cut Walker development build with:
 npm.cmd run dev:walker
 ```
 
-This installs the locally built `cut-walker-0.1.3.jar` into the isolated
+This installs the locally built `cut-walker-0.1.4.jar` into the isolated
 development plugin directory and disables the remote plugin catalog for that
 launcher process. It still uses product authentication and the signed staging
 client channel.
