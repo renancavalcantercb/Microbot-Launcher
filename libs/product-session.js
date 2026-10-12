@@ -5,8 +5,11 @@ const SESSION_FILE = 'product-session.json';
 const ACTIVATION_CODE_PATTERN = /^mbc_act_[A-Z2-9]{4}(?:-[A-Z2-9]{4}){3}$/;
 
 function resolveApiBaseUrl(productConfig, environment = process.env) {
-    const configured = environment[productConfig.productApiEnvironmentVariable]
-        || productConfig.productApiBaseUrl;
+    // A distributed launcher is bound to the backend of its embedded profile.
+    const override = productConfig.distribution?.locked
+        ? undefined
+        : environment[productConfig.productApiEnvironmentVariable];
+    const configured = override || productConfig.productApiBaseUrl;
     const parsed = new URL(configured);
     const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
     if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal)) {

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "environment": "staging",
+  "api": {
+    "baseUrl": "https://cut-staging.xulixnacc.online/api/v1"
+  },
+  "release": {
+    "channel": "staging",
+    "manifestUrl": "https://cut-staging.xulixnacc.online/api/v1/releases/staging/manifest",
+    "artifactBaseUrl": "https://cut-staging.xulixnacc.online/api/v1/",
+    "publicKeyId": "release-staging-2026-01",
+    "publicKey": "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAq2ZA2jkgH/6bTIM8tSlpI8vYzviaKNigtWF8zmfJffY8It8xQPPDmsQLFfr6gb/mTcoyUiW0FIbT+pGdQQ4za1+nYmWGSA5Jc/Va55DGhEvIyN0le1idhFYtBcw6rUXSuaOpIrKsMEaE/SdqyTc0NTCQ526+SojI+KbfwRKog/2j4+Epv1jE6U/HZiFHakuMu3AUR/lYDuwzusR5BAdqddotaFzJ0jg1hvPi+LELMG2xkRmq9RB6DxVR1yHxitfvfQ+TtqLqcqOFa/93WawaQ3YAnqDG1zMZ4N3li4UA4+Cg36NmCWMpjJIZbukUhLc+qNlVkSAv4lMPcuIp4qv7pOrrCluo3jWMmuFXVhcTM7jNTjTGNBrZoe1T7HOFTK0QW7AsGYuyCtdHKalF5nIjSc5KwJVGUcxjGF9t9AYBn6lZ1+TcPVTjyEdxbsESQKV38/zw64nev7pmPuUpgxFvxUOdqdNtfEr2GNZ8YZpMUdzHbVrBrOOIBBZpavVo4/9lAgMBAAE="
+  },
+  "pluginRepository": {
+    "manifestUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-staging/catalog.json",
+    "releasesUrl": "https://renancavalcantercb.github.io/microbot-cut-plugin-staging/",
+    "publicKeyId": "staging-2026",
+    "publicKey": "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAmCsFOb9R/R3oB+/0MNPfRomf1vbM20D+7RB2s1RSmbUhe30v8V5VFSEn6DbKvF41EHSDHVRtj7Kn0vN7kNxjD0aas+L2GSlKftz24bYw4CpmqXSH1MoAseb1kNTEqUJUAVcrKPXsa9xoqYi7+Gg5dBkYzuJxtnRYxGf5EaFmnabGo8+BX3lkUkVynogtfZuTIkOmv4AvftD9GlyBe5wVkbDH9Ee+jtuH0jW5KQS8RLR193ZbU5C16R/mDjp/EqHExdvvbK3OSy6ee5ZrDdFFgXRv7VzUJP6oXlVUS+QRaePAVvuQ/P+8pZL5hA+nbJxuOGBzi+roKCKFEdpnmB+kiQ0/WkfLicXh021W7lB1/eQhPsSFHtRBsGxvJKsZrjqFW1LKgw0ScS9Ex7+F4EQrszJ4tIiv4NcJrOzKNf0H3LTZjCrfhdu+atnbNKSc3qmMFhiaZKQPRBOwg9xDRsbvBuNVS8u1665NesHeMsjh9cH9MDFTuYjYu8RdIuDhZzv9AgMBAAE="
+  }
+}

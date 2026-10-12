@@ -18,7 +18,23 @@ const log = require('electron-log');
 const { ipcMain } = require('electron');
 const AdmZip = require('adm-zip');
 const packageJson = require(path.join(__dirname, 'package.json'));
-const productConfig = require(path.join(__dirname, 'product-config.js'));
+const { resolveRuntimeProductConfig } = require(path.join(__dirname, 'libs', 'distribution-profile.js'));
+// A packaged launcher runs only with the profile embedded at build time. There is no fallback:
+// without a valid profile it stops here instead of reaching for localhost or the environment.
+let productConfig;
+try {
+    productConfig = resolveRuntimeProductConfig({
+        productConfig: require(path.join(__dirname, 'product-config.js')),
+        isPackaged: app.isPackaged,
+        fs,
+        path,
+        root: __dirname
+    });
+} catch (error) {
+    log.error(`Distribution profile error: ${error.message}`);
+    dialog.showErrorBox('Microbot Cut Launcher cannot start', error.message);
+    process.exit(1);
+}
 const { spawn } = require('child_process');
 const {
     microbotDir,
@@ -78,6 +94,7 @@ async function loadLibraries() {
             shell: shell,
             clipboard: clipboard,
             projectDir: __dirname,
+            productConfig: productConfig,
             fs: fs,
             app: app,
             safeStorage: safeStorage,

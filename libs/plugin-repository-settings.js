@@ -18,6 +18,8 @@ const PROPERTY_NAMES = Object.freeze({
     publicKeyId: 'microbot.plugins.publicKeyId'
 });
 
+const DEVELOPMENT_MODE_PROPERTY = 'microbot.plugins.developmentMode';
+
 function parseHttpsUrl(value, label) {
     if (!value) return null;
 
@@ -58,11 +60,46 @@ function parseRsaPublicKey(value) {
     return normalized;
 }
 
+function buildLockedPluginRepositoryVmArgs(productConfig, log) {
+    const repository = productConfig.pluginRepository;
+    const settings = {
+        enabled: 'true',
+        manifestUrl: parseHttpsUrl(repository.manifestUrl, 'plugin repository manifest URL'),
+        releasesUrl: parseHttpsUrl(repository.releasesUrl, 'plugin repository releases URL'),
+        publicKey: parseRsaPublicKey(repository.publicKey),
+        publicKeyId: repository.publicKeyId
+    };
+    if (!settings.manifestUrl || !settings.releasesUrl) {
+        throw new Error('plugin repository profile is incomplete');
+    }
+    const args = Object.entries(settings).map(
+        ([name, value]) => `-D${PROPERTY_NAMES[name]}=${value}`
+    );
+    // Pin the properties a stray JAVA_TOOL_OPTIONS could otherwise add.
+    args.push(
+        `-D${DEVELOPMENT_MODE_PROPERTY}=false`,
+        `-D${PROPERTY_NAMES.releasesApiUrl}=${
+            repository.releasesApiUrl
+                ? parseHttpsUrl(repository.releasesApiUrl, 'plugin repository releases API URL')
+                : ''
+        }`
+    );
+    log.info(
+        `Plugin repository from the distribution profile: key ${settings.publicKeyId}, manifest ${settings.manifestUrl}`
+    );
+    return { enabled: true, args };
+}
+
 function buildPluginRepositoryVmArgs({
     environment = process.env,
     productConfig = {},
     log = console
 } = {}) {
+    // The embedded profile is authoritative: environment variables are not consulted and a
+    // problem is fatal instead of silently disabling the repository.
+    if (productConfig.distribution?.locked) {
+        return buildLockedPluginRepositoryVmArgs(productConfig, log);
+    }
     const names = {
         ...DEFAULT_ENVIRONMENT_VARIABLES,
         ...(productConfig.pluginRepositoryEnvironmentVariables || {})

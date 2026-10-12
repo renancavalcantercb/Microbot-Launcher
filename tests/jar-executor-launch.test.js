@@ -527,6 +527,50 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
         expect(launchLog).not.toContain(encodedKey);
     });
 
+    test('a distributed launcher uses its embedded plugin repository and drops local overrides', async () => {
+        const profileLib = require('../libs/distribution-profile');
+        const profile = profileLib.loadProfileSource({ fs, path, root: path.join(__dirname, '..'), name: 'staging' });
+        const lockedConfig = profileLib.applyDistributionProfile(
+            require('../product-config'),
+            { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' } }
+        );
+        process.env.DEBUG = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_DEV = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_MANIFEST_URL = 'https://evil.example/catalog.json';
+        process.env.MICROBOT_CUT_API_BASE_URL = 'http://localhost:5173/api/v1';
+        const probeOutput = [
+            '    java.home = /opt/fake-jdk',
+            '    java.version = 17.0.1',
+            '    sun.arch.data.model = 64',
+            'openjdk version "17.0.1"'
+        ].join('\n');
+        const harness = fakeRuntimeHarness(probeOutput);
+        harness.deps.productConfig = lockedConfig;
+
+        try {
+            await launch(harness);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+
+            const launchCall = harness.spawnCalls[1];
+            expect(launchCall.args).toEqual(expect.arrayContaining([
+                '-Dmicrobot.plugins.repository.enabled=true',
+                `-Dmicrobot.plugins.manifestUrl=${profile.pluginRepository.manifestUrl}`,
+                `-Dmicrobot.plugins.publicKeyId=${profile.pluginRepository.publicKeyId}`,
+                '-Dmicrobot.plugins.developmentMode=false'
+            ]));
+            expect(launchCall.args).not.toContain('-Dmicrobot.plugins.developmentMode=true');
+            expect(launchCall.args.join(' ')).not.toContain('evil.example');
+            const names = Object.keys(launchCall.options.env);
+            expect(names).not.toContain('MICROBOT_CUT_PLUGIN_DEV');
+            expect(names).not.toContain('MICROBOT_CUT_PLUGIN_MANIFEST_URL');
+            expect(names).not.toContain('MICROBOT_CUT_API_BASE_URL');
+            expect(launchCall.options.env.MICROBOT_CUT_CLIENT_TICKET).toBe('header.payload.signature');
+        } finally {
+            delete process.env.MICROBOT_CUT_API_BASE_URL;
+        }
+    });
+
     test('an unparseable Java version warns and still launches', async () => {
         const harness = fakeRuntimeHarness('    java.vendor = Mystery\n    sun.arch.data.model = 64\nmystery version "banana"\n');
         await launch(harness, { ram: '1g' });

@@ -29,7 +29,13 @@ module.exports = async function (deps) {
     const pluginDevelopmentEnvironmentVariable =
         productConfig?.pluginDevelopmentEnvironmentVariable ||
         'MICROBOT_CUT_PLUGIN_DEV';
+    const { isLocked, launchEnvironmentFor } = require(
+        path.join(__dirname, 'distribution-profile.js')
+    );
+    const distributionLocked = isLocked(productConfig);
+    // Plugin development mode loads a local jar; a distributed launcher never enables it.
     const pluginDevelopmentMode =
+        !distributionLocked &&
         process.env[pluginDevelopmentEnvironmentVariable] === 'true';
     const pluginRepositoryEnabledVariable =
         productConfig?.pluginRepositoryEnvironmentVariables?.enabled ||
@@ -556,7 +562,10 @@ module.exports = async function (deps) {
         try {
             jarProcess = spawn(executable, commandArgs, {
                 detached: true,
-                env: { ...process.env, ...launchEnvironment },
+                env: {
+                    ...launchEnvironmentFor(productConfig, process.env),
+                    ...launchEnvironment
+                },
                 ...extraArgs
             });
             clientLifecycle?.markStarted?.(launchId, jarProcess.pid);

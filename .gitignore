@@ -80,6 +80,8 @@ web_modules/
 .env.local
 .secrets/
 .release-work/
+# Generated for one build by scripts/build-distribution.js
+distribution-profile.json
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
