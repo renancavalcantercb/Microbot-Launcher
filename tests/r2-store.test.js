@@ -82,8 +82,8 @@ describe('R2 store', () => {
         expect(manifestCall[1].headers['if-none-match']).toBeUndefined();
         expect(artifactCall[1].headers['if-none-match']).toBe('*');
         expect(artifactCall[1].headers['if-match']).toBeUndefined();
-        expect(manifestCall[1].headers.Authorization).toMatch(/SignedHeaders=content-type;host;if-match;/);
-        expect(artifactCall[1].headers.Authorization).toMatch(/SignedHeaders=content-type;host;if-none-match;/);
+        expect(manifestCall[1].headers.Authorization).toMatch(/SignedHeaders=accept-encoding;content-type;host;if-match;/);
+        expect(artifactCall[1].headers.Authorization).toMatch(/SignedHeaders=accept-encoding;content-type;host;if-none-match;/);
     });
 
     test('there is no unconditional write', () => {
@@ -125,6 +125,27 @@ describe('R2 store', () => {
         expect(found.etag).toBe('"e1"');
         await expect(store.head('k')).resolves.toEqual({ found: true, size: 5, etag: '"e2"' });
         await expect(store.get('k')).rejects.toThrow(/HTTP 403 \(AccessDenied\)/);
+    });
+
+    test('asks for the object as stored, so the edge does not gzip it and weaken its ETag', async () => {
+        const fetchMock = jest.fn(async () => reply(200, { body: 'x', headers: { etag: '"e"' } }));
+        const store = createR2Store(options(fetchMock));
+        await store.get('k');
+        await store.head('k');
+        await store.putIfAbsent('k2', Buffer.from('x'), 'text/plain');
+        for (const call of fetchMock.mock.calls) {
+            expect(call[1].headers['accept-encoding']).toBe('identity');
+            expect(call[1].headers.Authorization).toMatch(/SignedHeaders=accept-encoding;/);
+        }
+    });
+
+    test('a weak ETag is refused where it is read and where it would be used', async () => {
+        const fetchMock = jest.fn(async () => reply(200, { body: 'x', headers: { etag: 'W/"e"' } }));
+        const store = createR2Store(options(fetchMock));
+        await expect(store.get('k')).rejects.toThrow(/weak ETag/);
+        await expect(store.head('k')).rejects.toThrow(/weak ETag/);
+        expect(() => store.putIfMatch('k', Buffer.from('x'), 'text/plain', 'W/"e"')).toThrow(/strong ETag/);
+        expect(fetchMock.mock.calls.every((call) => call[1].method !== 'PUT')).toBe(true);
     });
 
     test('a read-only store never sends a write', async () => {

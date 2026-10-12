@@ -111,6 +111,10 @@ function createR2Store({
     const secrets = [accessKeyId, secretAccessKey];
     const clean = (text) => secrets.reduce((value, secret) => value.split(secret).join('***'), String(text));
 
+    // Every request asks for the object as stored. Without this the R2 edge gzips the response and
+    // weakens its ETag (`W/"..."`), which If-Match must never be given. Measured on the staging
+    // bucket: HEAD and GET returned `W/"<md5>"` with content-encoding gzip, and
+    // `accept-encoding: identity` returned the strong `"<md5>"`.
     async function request(method, key, { body = null, headers = {} } = {}) {
         const objectPath = `/${bucket}/${key}`;
         const payload = body || Buffer.alloc(0);
@@ -118,7 +122,7 @@ function createR2Store({
             method,
             host: base.host,
             path: objectPath,
-            headers,
+            headers: { 'Accept-Encoding': 'identity', ...headers },
             payloadHash: sha256Hex(payload),
             accessKeyId,
             secretAccessKey,
@@ -151,18 +155,30 @@ function createR2Store({
 
     const etagOf = (response) => response.headers.get('etag');
 
+    // A weak ETag can never be the base of an If-Match write. Refuse it where it is read, so it
+    // cannot reach a bundle; the message names the cause.
+    function strongEtagOf(method, key, response) {
+        const etag = etagOf(response);
+        if (typeof etag === 'string' && /^W\//i.test(etag)) {
+            throw new R2Error(
+                `R2 ${method} ${key} returned a weak ETag; refusing to use it as the base of a conditional write`
+            );
+        }
+        return etag;
+    }
+
     async function get(key) {
         const response = await request('GET', key);
         if (response.status === 404) return { found: false };
         if (!response.ok) throw await failure('GET', key, response);
-        return { found: true, bytes: Buffer.from(await response.arrayBuffer()), etag: etagOf(response) };
+        return { found: true, bytes: Buffer.from(await response.arrayBuffer()), etag: strongEtagOf('GET', key, response) };
     }
 
     async function head(key) {
         const response = await request('HEAD', key);
         if (response.status === 404) return { found: false };
         if (!response.ok) throw await failure('HEAD', key, response);
-        return { found: true, size: Number(response.headers.get('content-length')), etag: etagOf(response) };
+        return { found: true, size: Number(response.headers.get('content-length')), etag: strongEtagOf('HEAD', key, response) };
     }
 
     // 412 (PreconditionFailed) is documented by Cloudflare; 409 is what S3 returns for a conditional
@@ -189,6 +205,7 @@ function createR2Store({
         putIfAbsent: (key, bytes, contentType) => conditionalPut(key, bytes, contentType, { 'If-None-Match': '*' }),
         putIfMatch: (key, bytes, contentType, etag) => {
             if (!etag) throw new Error('putIfMatch needs the ETag the write is based on');
+            if (/^W\//i.test(etag)) throw new Error('putIfMatch needs a strong ETag; a weak one (W/...) never matches');
             return conditionalPut(key, bytes, contentType, { 'If-Match': etag });
         }
     };
