@@ -40,6 +40,18 @@ module.exports = async function (deps) {
     const configuredProductVmArgs = pluginDevelopmentMode
         ? ['-Dmicrobot.plugins.developmentMode=true']
         : [];
+    if (pluginDevelopmentMode) {
+        const developmentArtifact =
+            process.env.MICROBOT_CUT_PLUGIN_DEV_ARTIFACT;
+        const developmentArtifactName =
+            process.env.MICROBOT_CUT_PLUGIN_DEV_ARTIFACT_NAME;
+        if (developmentArtifact && developmentArtifactName) {
+            configuredProductVmArgs.push(
+                `-Dmicrobot.plugins.developmentArtifact=${developmentArtifact}`,
+                `-Dmicrobot.plugins.developmentArtifactName=${developmentArtifactName}`
+            );
+        }
+    }
     configuredProductVmArgs.push(...pluginRepository.args);
     async function productVmArgsForLaunch() {
         if (typeof deps.productVmArgsForLaunch === 'function') {

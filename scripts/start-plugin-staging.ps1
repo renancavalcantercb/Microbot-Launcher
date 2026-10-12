@@ -40,6 +40,8 @@ if ($PluginDevelopment) {
     Copy-Item -Force -LiteralPath $resolvedPluginJar -Destination $developmentPluginJar
 
     $env:MICROBOT_CUT_PLUGIN_DEV = 'true'
+    $env:MICROBOT_CUT_PLUGIN_DEV_ARTIFACT = $resolvedPluginJar
+    $env:MICROBOT_CUT_PLUGIN_DEV_ARTIFACT_NAME = $PluginDevelopmentJarName
     $env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'false'
     foreach ($name in @(
         'MICROBOT_CUT_PLUGIN_MANIFEST_URL',
@@ -52,6 +54,8 @@ if ($PluginDevelopment) {
     Write-Host "Installed local plugin development artifact: $developmentPluginJar"
 } else {
     Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV -ErrorAction SilentlyContinue
+    Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV_ARTIFACT -ErrorAction SilentlyContinue
+    Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV_ARTIFACT_NAME -ErrorAction SilentlyContinue
     $env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true'
     $env:MICROBOT_CUT_PLUGIN_MANIFEST_URL = $repository.manifestUrl
     $env:MICROBOT_CUT_PLUGIN_RELEASES_URL = $repository.releasesUrl

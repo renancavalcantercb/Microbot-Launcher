@@ -29,6 +29,8 @@ let originalMode;
 let originalPluginDevelopmentMode;
 let originalPluginRepositoryEnvironment;
 const PLUGIN_REPOSITORY_ENVIRONMENT_VARIABLES = [
+    'MICROBOT_CUT_PLUGIN_DEV_ARTIFACT',
+    'MICROBOT_CUT_PLUGIN_DEV_ARTIFACT_NAME',
     'MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED',
     'MICROBOT_CUT_PLUGIN_MANIFEST_URL',
     'MICROBOT_CUT_PLUGIN_RELEASES_URL',
@@ -430,6 +432,10 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
 
     test('plugin development mode requires an explicit launcher environment variable', async () => {
         process.env.MICROBOT_CUT_PLUGIN_DEV = 'true';
+        process.env.MICROBOT_CUT_PLUGIN_DEV_ARTIFACT =
+            'C:\\plugins\\remote-guardian.jar';
+        process.env.MICROBOT_CUT_PLUGIN_DEV_ARTIFACT_NAME =
+            'RemoteControlPlugin.jar';
         const probeOutput = [
             '    java.home = /opt/fake-jdk',
             '    java.version = 17.0.1',
@@ -443,6 +449,12 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
 
         expect(harness.spawnCalls[1].args).toContain(
             '-Dmicrobot.plugins.developmentMode=true'
+        );
+        expect(harness.spawnCalls[1].args).toContain(
+            '-Dmicrobot.plugins.developmentArtifact=C:\\plugins\\remote-guardian.jar'
+        );
+        expect(harness.spawnCalls[1].args).toContain(
+            '-Dmicrobot.plugins.developmentArtifactName=RemoteControlPlugin.jar'
         );
         expect(harness.log.warn).toHaveBeenCalledWith(
             'Plugin development mode enabled by MICROBOT_CUT_PLUGIN_DEV.'
