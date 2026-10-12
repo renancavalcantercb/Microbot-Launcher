@@ -15,6 +15,7 @@ const {
     validateReleaseIdentity
 } = require('../libs/client-release-publication');
 const { verifyReleaseManifest } = require('../libs/release-manifest');
+const { requireClientReleaseKeepsLauncher } = require('../libs/launcher-release-publication');
 
 const launcherRoot = path.resolve(__dirname, '..');
 
@@ -207,9 +208,21 @@ function artifactUrl(config, artifactPath) {
     return new URL(artifactPath, config.publicBaseUrl).toString();
 }
 
+// Seam for tests: the commands reach the network, R2 and git only through these.
+const deps = {
+    workRoot: path.join(launcherRoot, '.release-work'),
+    liveManifest,
+    fetchResponse,
+    r2Get,
+    r2Put,
+    runGradleBuild,
+    gitCommit,
+    gitDirty
+};
+
 function releaseBundle(config, options) {
     const directory = bundleDirectory(
-        path.join(launcherRoot, '.release-work'),
+        deps.workRoot,
         config.channel,
         options.version,
         options.sequence
@@ -238,14 +251,16 @@ function gitDirty(repository) {
 }
 
 async function prepare(config, options) {
-    const sourceDirty = gitDirty(config.clientRepository);
+    const sourceDirty = deps.gitDirty(config.clientRepository);
     if (sourceDirty && !options['allow-dirty']) {
         throw new Error('client repository has uncommitted changes; commit them or use --allow-dirty for a local-only bundle');
     }
-    if (!options['skip-build']) runGradleBuild(config);
+    // A client release must not unpublish the launcher: the live entry is carried over unchanged.
+    const live = await deps.liveManifest(config, { allowMissing: true });
+    if (!options['skip-build']) deps.runGradleBuild(config);
     const sourceJar = path.resolve(launcherRoot, options['source-jar'] || config.sourceJar);
     const outputDirectory = bundleDirectory(
-        path.join(launcherRoot, '.release-work'),
+        deps.workRoot,
         config.channel,
         options.version,
         options.sequence
@@ -260,8 +275,9 @@ async function prepare(config, options) {
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey,
-        sourceCommit: gitCommit(config.clientRepository),
-        sourceDirty
+        sourceCommit: deps.gitCommit(config.clientRepository),
+        sourceDirty,
+        launcher: live?.launcher ?? null
     });
     process.stdout.write(
         `Prepared ${options.version} sequence ${options.sequence}\n` +
@@ -273,17 +289,18 @@ async function prepare(config, options) {
 
 async function prepareRollback(config, options) {
     const sourceDirectory = bundleDirectory(
-        path.join(launcherRoot, '.release-work'),
+        deps.workRoot,
         config.channel,
         options.version,
         options['source-sequence']
     );
     const outputDirectory = bundleDirectory(
-        path.join(launcherRoot, '.release-work'),
+        deps.workRoot,
         config.channel,
         options.version,
         options.sequence
     );
+    const live = await deps.liveManifest(config, { allowMissing: true });
     const result = prepareClientRollback({
         sourceDirectory,
         outputDirectory,
@@ -291,7 +308,8 @@ async function prepareRollback(config, options) {
         sequence: options.sequence,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
-        publicKey: config.publicKey
+        publicKey: config.publicKey,
+        launcher: live?.launcher ?? null
     });
     process.stdout.write(
         `Prepared rollback to ${options.version} at sequence ${options.sequence}\n` +
@@ -306,10 +324,11 @@ async function stage(config, options) {
     if (bundle.metadata.sourceDirty) {
         throw new Error('refusing to stage a release prepared from an uncommitted client worktree');
     }
-    const current = await liveManifest(config, { allowMissing: true });
+    const current = await deps.liveManifest(config, { allowMissing: true });
     requireNewerSequence(bundle.payload, current);
+    requireClientReleaseKeepsLauncher(bundle.payload, current);
     const publicUrl = artifactUrl(config, bundle.payload.client.artifactPath);
-    const head = await fetchResponse(publicUrl, { method: 'HEAD', cache: 'no-store' });
+    const head = await deps.fetchResponse(publicUrl, { method: 'HEAD', cache: 'no-store' });
     if (![200, 404].includes(head.status)) {
         throw new Error(`artifact preflight returned unexpected HTTP ${head.status}`);
     }
@@ -324,9 +343,9 @@ async function stage(config, options) {
     try {
         const artifactReadback = path.join(temporaryDirectory, bundle.metadata.artifactFile);
         if (head.status === 404) {
-            r2Put(config, bundle.metadata.artifactObjectKey, bundle.artifactFile, 'application/java-archive');
+            deps.r2Put(config, bundle.metadata.artifactObjectKey, bundle.artifactFile, 'application/java-archive');
         }
-        const artifactResponse = await fetchResponse(publicUrl, { cache: 'no-store' });
+        const artifactResponse = await deps.fetchResponse(publicUrl, { cache: 'no-store' });
         if (!artifactResponse.ok) throw new Error(`artifact read-back returned HTTP ${artifactResponse.status}`);
         await downloadResponse(artifactResponse, artifactReadback);
         if (
@@ -337,7 +356,7 @@ async function stage(config, options) {
         }
 
         const candidateReadback = path.join(temporaryDirectory, 'candidate.json');
-        const candidateExists = r2Get(
+        const candidateExists = deps.r2Get(
             config,
             bundle.metadata.candidateObjectKey,
             candidateReadback,
@@ -347,8 +366,8 @@ async function stage(config, options) {
             throw new Error('immutable candidate manifest already exists; use --resume only to verify it');
         }
         if (!candidateExists) {
-            r2Put(config, bundle.metadata.candidateObjectKey, path.join(bundle.directory, 'manifest.json'), 'application/json');
-            r2Get(config, bundle.metadata.candidateObjectKey, candidateReadback);
+            deps.r2Put(config, bundle.metadata.candidateObjectKey, path.join(bundle.directory, 'manifest.json'), 'application/json');
+            deps.r2Get(config, bundle.metadata.candidateObjectKey, candidateReadback);
         }
         const candidateEnvelope = JSON.parse(fs.readFileSync(candidateReadback, 'utf8'));
         const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
@@ -369,7 +388,7 @@ async function stage(config, options) {
 }
 
 async function verifyPublicRelease(config, bundle) {
-    const current = await liveManifest(config);
+    const current = await deps.liveManifest(config);
     if (
         current.sequence !== bundle.payload.sequence ||
         current.client.sha256 !== bundle.payload.client.sha256
@@ -377,11 +396,11 @@ async function verifyPublicRelease(config, bundle) {
         throw new Error('public manifest does not match the selected release bundle');
     }
     const publicUrl = artifactUrl(config, bundle.payload.client.artifactPath);
-    const head = await fetchResponse(publicUrl, { method: 'HEAD', cache: 'no-store' });
+    const head = await deps.fetchResponse(publicUrl, { method: 'HEAD', cache: 'no-store' });
     if (!head.ok || Number(head.headers.get('content-length')) !== bundle.payload.client.size) {
         throw new Error('public artifact HEAD validation failed');
     }
-    const range = await fetchResponse(publicUrl, {
+    const range = await deps.fetchResponse(publicUrl, {
         headers: { Range: 'bytes=0-0' },
         cache: 'no-store'
     });
@@ -400,9 +419,10 @@ async function promote(config, options) {
         throw new Error('promotion requires --confirm-promote');
     }
     const bundle = releaseBundle(config, options);
-    const current = await liveManifest(config, { allowMissing: true });
+    const current = await deps.liveManifest(config, { allowMissing: true });
     requireNewerSequence(bundle.payload, current);
-    const artifactHead = await fetchResponse(
+    requireClientReleaseKeepsLauncher(bundle.payload, current);
+    const artifactHead = await deps.fetchResponse(
         artifactUrl(config, bundle.payload.client.artifactPath),
         { method: 'HEAD', cache: 'no-store' }
     );
@@ -415,7 +435,7 @@ async function promote(config, options) {
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-promote-'));
     try {
         const candidate = path.join(temporaryDirectory, 'candidate.json');
-        if (!r2Get(config, bundle.metadata.candidateObjectKey, candidate, { allowMissing: true })) {
+        if (!deps.r2Get(config, bundle.metadata.candidateObjectKey, candidate, { allowMissing: true })) {
             throw new Error('candidate manifest is not staged');
         }
         const candidateEnvelope = JSON.parse(fs.readFileSync(candidate, 'utf8'));
@@ -430,7 +450,7 @@ async function promote(config, options) {
         ) {
             throw new Error('staged candidate does not match the local release bundle');
         }
-        r2Put(config, bundle.metadata.manifestObjectKey, candidate, 'application/json');
+        deps.r2Put(config, bundle.metadata.manifestObjectKey, candidate, 'application/json');
     } finally {
         fs.rmSync(temporaryDirectory, { recursive: true, force: true });
     }
@@ -461,4 +481,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { loadConfiguration, main, parseArguments };
+module.exports = { deps, loadConfiguration, main, parseArguments, prepare, prepareRollback, promote, stage };

@@ -13,6 +13,8 @@ const {
     readAndVerifyLauncherBundle,
     requireClientReleaseKeepsLauncher,
     requireLauncherReleaseKeepsClient,
+    requireSameSourceCandidates,
+    verifyLauncherCandidate,
     verifyUpdaterMetadata
 } = require('../libs/launcher-release-publication');
 const {
@@ -37,6 +39,33 @@ function sha512Base64(bytes) {
     return crypto.createHash('sha512').update(bytes).digest('base64');
 }
 
+const COMMIT = 'a'.repeat(40);
+
+// What scripts/build-distribution.js records next to an installer.
+function candidateFor(profile, bytes, overrides = {}) {
+    return {
+        kind: 'launcher-candidate',
+        unsigned: true,
+        profile,
+        version: VERSION,
+        file: FILE_NAME,
+        size: bytes.length,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        sha512Base64: sha512Base64(bytes),
+        sourceCommit: COMMIT,
+        sourceDirty: false,
+        effectiveConfiguration: {
+            environment: profile,
+            releaseChannel: profile,
+            environmentVariableOverrides: false,
+            launcherUpdateFeed: null
+        },
+        embeddedProfileSha256: crypto.createHash('sha256').update('profile-' + profile).digest('hex'),
+        appAsarSha256: crypto.createHash('sha256').update('asar-' + profile).digest('hex'),
+        ...overrides
+    };
+}
+
 describe('launcher release publication', () => {
     let directory;
     let installerPath;
@@ -56,6 +85,7 @@ describe('launcher release publication', () => {
         privateKeyPem,
         publicKey,
         publishedAt: '2026-10-12T12:00:00.000Z',
+        candidate: candidateFor('staging', installerBytes),
         ...overrides
     });
 
@@ -329,6 +359,96 @@ describe('launcher release publication', () => {
                 publicKey
             });
             expect(prepared.payload.launcher).toBeNull();
+        });
+    });
+
+    describe('per-environment candidates', () => {
+        const stagingBytes = () => installerBytes;
+
+        test('records the profile and source in the bundle', () => {
+            prepare();
+            const release = JSON.parse(fs.readFileSync(
+                path.join(launcherBundleDirectory(directory, 'staging', VERSION, 20), 'release.json'), 'utf8'));
+            expect(release).toMatchObject({ profile: 'staging', sourceCommit: COMMIT, sourceDirty: false });
+            expect(release.embeddedProfileSha256).toMatch(/^[0-9a-f]{64}$/);
+        });
+
+        const effective = (overrides) => ({
+            environment: 'staging',
+            releaseChannel: 'staging',
+            environmentVariableOverrides: false,
+            launcherUpdateFeed: null,
+            ...overrides
+        });
+
+        test.each([
+            ['a candidate for the other environment', { profile: 'production' }, /built for production/],
+            ['a mismatched effective configuration', { effectiveConfiguration: effective({ environment: 'production' }) }, /effective configuration/],
+            ['environment variable overrides', { effectiveConfiguration: effective({ environmentVariableOverrides: true }) }, /overrides/],
+            ['a launcher update feed', { effectiveConfiguration: effective({ launcherUpdateFeed: 'https://x' }) }, /update feed/],
+            ['another version', { version: '3.2.12' }, /version/],
+            ['a dirty working tree', { sourceDirty: true }, /uncommitted/],
+            ['a missing or short commit', { sourceCommit: 'abc' }, /source commit/],
+            ['a corrupt profile hash', { embeddedProfileSha256: 'zz' }, /embeddedProfileSha256/],
+            ['bytes that do not match the record', { sha256: 'f'.repeat(64) }, /do not match/],
+            ['a wrong kind', { kind: 'launcher-l2-candidate' }, /wrong kind/]
+        ])('refuses %s', (_label, overrides, pattern) => {
+            expect(() => prepare({ candidate: candidateFor('staging', stagingBytes(), overrides) })).toThrow(pattern);
+            expect(fs.existsSync(launcherBundleDirectory(directory, 'staging', VERSION, 20))).toBe(false);
+        });
+
+        test('refuses a release without a candidate', () => {
+            expect(() => prepare({ candidate: undefined })).toThrow(/candidate/);
+        });
+
+        test('a production bundle needs the staging candidate of the same source', () => {
+            const productionBytes = crypto.randomBytes(4096);
+            const stagingCandidate = candidateFor('staging', stagingBytes());
+            fs.writeFileSync(installerPath, productionBytes);
+            const candidate = candidateFor('production', productionBytes);
+            const production = (overrides = {}) => prepare({
+                outputDirectory: launcherBundleDirectory(directory, 'production', VERSION, 21),
+                channel: 'production',
+                sequence: 21,
+                candidate,
+                stagingCandidate,
+                ...overrides
+            });
+            expect(() => production({ stagingCandidate: null })).toThrow(/staging candidate/);
+            expect(() => production({ stagingCandidate: { ...stagingCandidate, sourceCommit: 'b'.repeat(40) } }))
+                .toThrow(/different commits/);
+            expect(() => production({ stagingCandidate: { ...stagingCandidate, version: '3.2.12' } }))
+                .toThrow(/different versions/);
+            expect(() => production({ stagingCandidate: { ...stagingCandidate, sha256: candidate.sha256 } }))
+                .toThrow(/not environment-specific/);
+            expect(() => production({
+                stagingCandidate: { ...stagingCandidate, embeddedProfileSha256: candidate.embeddedProfileSha256 }
+            })).toThrow(/not environment-specific/);
+            expect(production().payload.channel).toBe('production');
+        });
+
+        test('requireSameSourceCandidates demands one staging and one production candidate', () => {
+            const a = candidateFor('staging', Buffer.from('a'));
+            const b = candidateFor('production', Buffer.from('b'));
+            expect(() => requireSameSourceCandidates(a, b)).not.toThrow();
+            expect(() => requireSameSourceCandidates(b, a)).toThrow(/one staging and one production/);
+            expect(() => requireSameSourceCandidates(a, a)).toThrow(/one staging and one production/);
+        });
+
+        test('a read-back bundle whose profile is not its channel is refused', () => {
+            prepare();
+            const outputDirectory = launcherBundleDirectory(directory, 'staging', VERSION, 20);
+            const file = path.join(outputDirectory, 'release.json');
+            const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+            fs.writeFileSync(file, JSON.stringify({ ...release, profile: 'production' }));
+            expect(() => readAndVerifyLauncherBundle({
+                outputDirectory, channel: 'staging', keyId: 'release-staging-test', publicKey
+            })).toThrow(/does not match its signed manifest/);
+        });
+
+        test('verifyLauncherCandidate returns the validated record', () => {
+            const candidate = candidateFor('staging', stagingBytes());
+            expect(verifyLauncherCandidate({ candidate, installerPath, channel: 'staging', version: VERSION })).toBe(candidate);
         });
     });
 

@@ -120,6 +120,50 @@ function verifyUpdaterMetadata({ metadataText, installerPath, version }) {
     return { ...parsed, ...actual };
 }
 
+// One installer is built per environment (scripts/build-distribution.js), each with its own
+// embedded profile. Staging and production binaries differ, but both must come from the same
+// clean commit and logical version, and each is validated here before it can be published.
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+function verifyLauncherCandidate({ candidate, installerPath, channel, version }) {
+    if (!CHANNELS.includes(channel)) throw new Error('release channel is invalid');
+    validateLauncherVersion(version);
+    if (!candidate || candidate.kind !== 'launcher-candidate') throw new Error('candidate metadata is missing or has the wrong kind');
+    if (candidate.profile !== channel) throw new Error(`candidate was built for ${candidate.profile}, not ${channel}`);
+    const effective = candidate.effectiveConfiguration || {};
+    if (effective.environment !== channel || effective.releaseChannel !== channel) {
+        throw new Error('candidate effective configuration does not match the channel');
+    }
+    if (effective.environmentVariableOverrides !== false) throw new Error('candidate allows environment variable overrides');
+    if (effective.launcherUpdateFeed !== null) throw new Error('candidate enables a launcher update feed');
+    if (candidate.version !== version) throw new Error('candidate version does not match the release version');
+    if (candidate.file !== installerFileName(version)) throw new Error('candidate file name does not match the release version');
+    if (!COMMIT_PATTERN.test(candidate.sourceCommit || '')) throw new Error('candidate has no source commit');
+    if (candidate.sourceDirty !== false) throw new Error('candidate was built from an uncommitted working tree');
+    for (const field of ['embeddedProfileSha256', 'appAsarSha256', 'sha256']) {
+        if (!SHA256_PATTERN.test(candidate[field] || '')) throw new Error(`candidate ${field} is invalid`);
+    }
+    const actual = describeInstaller(installerPath);
+    if (path.basename(installerPath) !== candidate.file) throw new Error('installer file name does not match its candidate');
+    if (actual.size !== candidate.size || actual.sha256 !== candidate.sha256 || actual.sha512Base64 !== candidate.sha512Base64) {
+        throw new Error('installer bytes do not match their candidate record');
+    }
+    return candidate;
+}
+
+// Staging and production candidates of one release: same source, different bytes.
+function requireSameSourceCandidates(staging, production) {
+    if (staging?.profile !== 'staging' || production?.profile !== 'production') {
+        throw new Error('expected one staging and one production candidate');
+    }
+    if (staging.sourceCommit !== production.sourceCommit) throw new Error('staging and production candidates come from different commits');
+    if (staging.version !== production.version) throw new Error('staging and production candidates have different versions');
+    if (staging.sha256 === production.sha256 || staging.embeddedProfileSha256 === production.embeddedProfileSha256) {
+        throw new Error('staging and production candidates are not environment-specific builds');
+    }
+}
+
 function writeJsonExclusive(filePath, value) {
     fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
 }
@@ -146,8 +190,9 @@ function prepareLauncherRelease({
     publicKey,
     publishedAt = new Date().toISOString(),
     releaseDate = publishedAt,
-    sourceCommit = null,
-    sourceDirty = null
+    // candidate.json of this binary, and (for production) of the staging binary of the same release.
+    candidate,
+    stagingCandidate = null
 }) {
     validateLauncherVersion(version);
     validateLauncherVersion(minimumSupportedVersion, 'minimum supported launcher version');
@@ -161,6 +206,11 @@ function prepareLauncherRelease({
     const fileName = installerFileName(version);
     if (path.basename(installerPath) !== fileName) {
         throw new Error(`installer file name must be ${fileName}`);
+    }
+    verifyLauncherCandidate({ candidate, installerPath, channel, version });
+    if (channel === 'production') {
+        if (!stagingCandidate) throw new Error('a production launcher requires the staging candidate of the same release');
+        requireSameSourceCandidates(stagingCandidate, candidate);
     }
     if (fs.existsSync(outputDirectory)) {
         throw new Error(`release bundle already exists: ${outputDirectory}`);
@@ -231,8 +281,11 @@ function prepareLauncherRelease({
             sha512Base64: described.sha512Base64,
             candidateObjectKey: `releases/${channel}/candidates/sequence-${sequence}-manifest.json`,
             manifestObjectKey: `releases/${channel}/manifest.json`,
-            sourceCommit,
-            sourceDirty,
+            profile: candidate.profile,
+            sourceCommit: candidate.sourceCommit,
+            sourceDirty: false,
+            embeddedProfileSha256: candidate.embeddedProfileSha256,
+            appAsarSha256: candidate.appAsarSha256,
             preparedAt: new Date().toISOString()
         });
         return { payload, envelope, artifactFile, updaterFile };
@@ -269,6 +322,8 @@ function readAndVerifyLauncherBundle({ outputDirectory, channel, keyId, publicKe
     if (
         metadata.kind !== 'launcher' ||
         metadata.channel !== channel ||
+        metadata.profile !== channel ||
+        metadata.sourceDirty !== false ||
         metadata.sequence !== payload.sequence ||
         metadata.version !== payload.launcher.version ||
         metadata.artifactObjectKey !== entry.artifactPath ||
@@ -279,11 +334,21 @@ function readAndVerifyLauncherBundle({ outputDirectory, channel, keyId, publicKe
     return { metadata, envelope, payload, artifactFile, updaterFile };
 }
 
-// A client-only release must not drop (or change) the launcher that is already published,
-// otherwise the Download page would report the installer as unavailable.
+// Key order is not significant: verified manifests may normalize it.
+function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value === undefined ? null : value);
+}
+
+// A client-only release must carry exactly the launcher entry that is live: dropping it would make
+// the Download page report the installer as unavailable, and a stale entry would resurrect a
+// launcher that was changed or withdrawn since the candidate was prepared.
 function requireClientReleaseKeepsLauncher(candidate, current) {
-    if (!current || !current.launcher) return;
-    if (JSON.stringify(candidate.launcher) !== JSON.stringify(current.launcher)) {
+    if (!current) return;
+    if (canonicalJson(candidate.launcher ?? null) !== canonicalJson(current.launcher ?? null)) {
         throw new Error('release would remove or change the live launcher entry; prepare it again from the live manifest');
     }
 }
@@ -291,7 +356,7 @@ function requireClientReleaseKeepsLauncher(candidate, current) {
 // A launcher release must not change the client entry it was prepared against.
 function requireLauncherReleaseKeepsClient(candidate, current) {
     if (!current) return;
-    if (JSON.stringify(candidate.client) !== JSON.stringify(current.client)) {
+    if (canonicalJson(candidate.client) !== canonicalJson(current.client)) {
         throw new Error('release would change the live client entry; prepare it again from the live manifest');
     }
 }
@@ -309,6 +374,8 @@ module.exports = {
     readAndVerifyLauncherBundle,
     requireClientReleaseKeepsLauncher,
     requireLauncherReleaseKeepsClient,
+    requireSameSourceCandidates,
     validateLauncherVersion,
+    verifyLauncherCandidate,
     verifyUpdaterMetadata
 };
