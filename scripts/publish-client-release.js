@@ -1,9 +1,6 @@
-const childProcess = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
 
 const {
     bundleDirectory,
@@ -16,8 +13,9 @@ const {
 } = require('../libs/client-release-publication');
 const { verifyReleaseManifest } = require('../libs/release-manifest');
 const { requireClientReleaseKeepsLauncher } = require('../libs/launcher-release-publication');
+const io = require('../libs/release-publication-io');
 
-const launcherRoot = path.resolve(__dirname, '..');
+const { acquirePublicationLock, artifactUrl, downloadResponse, launcherRoot, loadConfiguration, run } = io;
 
 function usage() {
     return [
@@ -67,46 +65,6 @@ function parseArguments(argv) {
     return { command, options };
 }
 
-function loadConfiguration(configArgument) {
-    const configPath = path.resolve(
-        launcherRoot,
-        configArgument || 'config/release-publication.staging.json'
-    );
-    const configDirectory = path.dirname(configPath);
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const publicMetadata = JSON.parse(
-        fs.readFileSync(path.resolve(configDirectory, config.publicKeyFile), 'utf8')
-    );
-    if (publicMetadata.keyId !== config.keyId) {
-        throw new Error('publication and public key IDs do not match');
-    }
-    return {
-        ...config,
-        configPath,
-        publicKey: publicMetadata.publicKey,
-        privateKeyPath: path.resolve(configDirectory, config.privateKeyFile),
-        clientRepository: path.resolve(configDirectory, config.clientRepository),
-        backendRepository: path.resolve(configDirectory, config.backendRepository),
-        gradleUserHome: path.resolve(configDirectory, config.gradleUserHome),
-        sourceJar: path.resolve(configDirectory, config.sourceJar)
-    };
-}
-
-function run(command, args, cwd, options = {}) {
-    const result = childProcess.spawnSync(command, args, {
-        cwd,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: options.env ? { ...process.env, ...options.env } : process.env
-    });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-        const details = (result.stderr || result.stdout || '').trim();
-        throw new Error(`${path.basename(command)} failed${details ? `: ${details}` : ''}`);
-    }
-    return (result.stdout || '').trim();
-}
-
 function runGradleBuild(config) {
     const executable = process.platform === 'win32'
         ? path.join(config.clientRepository, 'gradlew.bat')
@@ -130,91 +88,13 @@ function runGradleBuild(config) {
     run(executable, [':client:assemble'], config.clientRepository, { env: environment });
 }
 
-function wrangler(config, args, { allowMissing = false } = {}) {
-    const executable = path.join(
-        config.backendRepository,
-        'node_modules',
-        'wrangler',
-        'bin',
-        'wrangler.js'
-    );
-    if (!fs.existsSync(executable)) {
-        throw new Error(
-            `Wrangler is not installed in the backend repository (${executable}); run npm install there first`
-        );
-    }
-    const result = childProcess.spawnSync(process.execPath, [executable, ...args], {
-        cwd: config.backendRepository,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe']
-    });
-    if (result.error) {
-        throw new Error(`Wrangler could not start: ${result.error.message}`);
-    }
-    if (result.status === 0) return true;
-    const details = `${result.stderr || ''}\n${result.stdout || ''}`.trim();
-    if (allowMissing && /not found|does not exist|10007/i.test(details)) return false;
-    throw new Error(`Wrangler failed${details ? `: ${details}` : ''}`);
-}
-
-function r2Get(config, objectKey, destination, options = {}) {
-    const found = wrangler(
-        config,
-        ['r2', 'object', 'get', `${config.bucket}/${objectKey}`, '--remote', '--file', destination],
-        options
-    );
-    if (!found) {
-        try {
-            fs.unlinkSync(destination);
-        } catch (error) {
-            if (error.code !== 'ENOENT') throw error;
-        }
-    }
-    return found;
-}
-
-function r2Put(config, objectKey, source, contentType) {
-    wrangler(config, [
-        'r2', 'object', 'put', `${config.bucket}/${objectKey}`, '--remote',
-        '--file', source, '--content-type', contentType, '--force'
-    ]);
-}
-
-async function fetchResponse(url, options = {}) {
-    const response = await fetch(url, { redirect: 'error', ...options });
-    return response;
-}
-
-async function downloadResponse(response, destination) {
-    if (!response.body) throw new Error('download response did not contain a body');
-    await pipeline(
-        Readable.fromWeb(response.body),
-        fs.createWriteStream(destination, { flags: 'wx' })
-    );
-}
-
-async function liveManifest(config, { allowMissing = false } = {}) {
-    const response = await fetchResponse(config.manifestUrl, { cache: 'no-store' });
-    if (allowMissing && response.status === 404) return null;
-    if (!response.ok) throw new Error(`live manifest returned HTTP ${response.status}`);
-    const envelope = await response.json();
-    return verifyReleaseManifest(envelope, {
-        expectedChannel: config.channel,
-        trustedKeys: { [config.keyId]: config.publicKey }
-    });
-}
-
-function artifactUrl(config, artifactPath) {
-    return new URL(artifactPath, config.publicBaseUrl).toString();
-}
-
 // Seam for tests: the commands reach the network, R2 and git only through these.
 const deps = {
     workRoot: path.join(launcherRoot, '.release-work'),
-    liveManifest,
-    fetchResponse,
-    r2Get,
-    r2Put,
+    liveManifest: io.liveManifest,
+    fetchResponse: io.fetchResponse,
+    r2Get: io.r2Get,
+    r2Put: io.r2Put,
     runGradleBuild,
     gitCommit,
     gitDirty
@@ -469,9 +349,13 @@ async function main(argv = process.argv.slice(2)) {
     const config = loadConfiguration(options.config);
     if (command === 'prepare') return prepare(config, options);
     if (command === 'prepare-rollback') return prepareRollback(config, options);
-    if (command === 'stage') return stage(config, options);
-    if (command === 'promote') return promote(config, options);
-    return verify(config, options);
+    if (command === 'verify') return verify(config, options);
+    const release = acquirePublicationLock(deps.workRoot, config.channel, `client ${command} ${options.version}`);
+    try {
+        return await (command === 'stage' ? stage(config, options) : promote(config, options));
+    } finally {
+        release();
+    }
 }
 
 if (require.main === module) {
