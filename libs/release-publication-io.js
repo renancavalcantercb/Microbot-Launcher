@@ -7,14 +7,11 @@ const { pipeline } = require('stream/promises');
 
 const { verifyReleaseManifest } = require('./release-manifest');
 
-// Everything the publication CLIs do against the outside world lives here, behind one seam
-// (the `deps` object of each CLI), so the commands can be tested with fixtures and never need the
-// real R2 bucket or the network.
+// What the publication CLIs share besides R2 (see r2-store.js and release-store-ops.js): the
+// configuration, the edge, git and the per-machine lock. Each CLI reaches all of it through its
+// `deps` object, so the commands can be tested with fixtures and never need the network.
 
 const launcherRoot = path.resolve(__dirname, '..');
-
-// `wrangler r2 object put` refuses larger files (MAX_UPLOAD_SIZE_BYTES in wrangler 4.x).
-const MAX_WRANGLER_UPLOAD_BYTES = 300 * 1024 * 1024;
 
 function loadConfiguration(configArgument) {
     const configPath = path.resolve(
@@ -54,59 +51,6 @@ function run(command, args, cwd, options = {}) {
         throw new Error(`${path.basename(command)} failed${details ? `: ${details}` : ''}`);
     }
     return (result.stdout || '').trim();
-}
-
-function wrangler(config, args, { allowMissing = false } = {}) {
-    const executable = path.join(
-        config.backendRepository,
-        'node_modules',
-        'wrangler',
-        'bin',
-        'wrangler.js'
-    );
-    if (!fs.existsSync(executable)) {
-        throw new Error(
-            `Wrangler is not installed in the backend repository (${executable}); run npm install there first`
-        );
-    }
-    const result = childProcess.spawnSync(process.execPath, [executable, ...args], {
-        cwd: config.backendRepository,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe']
-    });
-    if (result.error) {
-        throw new Error(`Wrangler could not start: ${result.error.message}`);
-    }
-    if (result.status === 0) return true;
-    const details = `${result.stderr || ''}\n${result.stdout || ''}`.trim();
-    if (allowMissing && /not found|does not exist|10007/i.test(details)) return false;
-    throw new Error(`Wrangler failed${details ? `: ${details}` : ''}`);
-}
-
-function r2Get(config, objectKey, destination, options = {}) {
-    const found = wrangler(
-        config,
-        ['r2', 'object', 'get', `${config.bucket}/${objectKey}`, '--remote', '--file', destination],
-        options
-    );
-    if (!found) {
-        try {
-            fs.unlinkSync(destination);
-        } catch (error) {
-            if (error.code !== 'ENOENT') throw error;
-        }
-    }
-    return found;
-}
-
-// `wrangler r2 object put` always overwrites: `--force` only skips the Basin Catalog prompt, and the
-// command has no conditional (If-None-Match / If-Match) option. Immutability is therefore enforced
-// by the callers (check, put, read back), never by R2. See "Concurrent publications" in the runbook.
-function r2Put(config, objectKey, source, contentType) {
-    wrangler(config, [
-        'r2', 'object', 'put', `${config.bucket}/${objectKey}`, '--remote',
-        '--file', source, '--content-type', contentType, '--force'
-    ]);
 }
 
 async function fetchResponse(url, options = {}) {
@@ -196,7 +140,6 @@ function acquirePublicationLock(workRoot, channel, command) {
 }
 
 module.exports = {
-    MAX_WRANGLER_UPLOAD_BYTES,
     acquirePublicationLock,
     artifactUrl,
     downloadResponse,
@@ -204,8 +147,5 @@ module.exports = {
     launcherRoot,
     liveManifest,
     loadConfiguration,
-    r2Get,
-    r2Put,
-    run,
-    wrangler
+    run
 };

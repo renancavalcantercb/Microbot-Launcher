@@ -1,14 +1,14 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
-const { requireNewerSequence, sha256File } = require('../libs/client-release-publication');
+const { requireNewerSequence } = require('../libs/client-release-publication');
 const launcherRelease = require('../libs/launcher-release-publication');
 const { verifyReleaseManifest } = require('../libs/release-manifest');
 const io = require('../libs/release-publication-io');
+const ops = require('../libs/release-store-ops');
+const { openStore } = require('../libs/r2-store');
 
 const {
-    MAX_WRANGLER_UPLOAD_BYTES,
     acquirePublicationLock,
     artifactUrl,
     launcherRoot,
@@ -19,20 +19,20 @@ const INSTALLER_CONTENT_TYPE = 'application/vnd.microsoft.portable-executable';
 const UPDATER_CONTENT_TYPE = 'text/yaml';
 const DEFAULT_STAGING_CONFIG = 'config/release-publication.staging.json';
 
-// Seam for tests: the commands reach R2, the network and the clock only through these. Nothing in
-// this file spawns wrangler or fetches a URL by itself.
+// Seam for tests: the commands reach R2, the network and the clock only through these. `openStore`
+// builds the S3 transport; a store opened with `writable: false` cannot write at all, and every
+// command that must not write (prepare, verify, any dry run) opens it that way.
 const deps = {
     workRoot: path.join(launcherRoot, '.release-work'),
     liveManifest: io.liveManifest,
     fetchResponse: io.fetchResponse,
-    r2Get: io.r2Get,
-    r2Put: io.r2Put
+    openStore
 };
 
 const COMMAND_OPTIONS = {
-    prepare: ['version', 'sequence', 'candidate', 'validated-sha256', 'staging-candidate', 'staging-config', 'minimum-supported', 'config'],
-    'prepare-rollback': ['version', 'sequence', 'source-sequence', 'config'],
-    'prepare-withdraw': ['sequence', 'config'],
+    prepare: ['version', 'candidate', 'validated-sha256', 'staging-candidate', 'staging-config', 'minimum-supported', 'config'],
+    'prepare-rollback': ['version', 'source-sequence', 'config'],
+    'prepare-withdraw': ['config'],
     stage: ['version', 'sequence', 'withdrawal', 'resume', 'dry-run', 'staging-config', 'config'],
     promote: ['version', 'sequence', 'withdrawal', 'confirm-promote', 'dry-run', 'staging-config', 'config'],
     verify: ['version', 'sequence', 'withdrawal', 'config']
@@ -43,10 +43,12 @@ function usage() {
     return [
         'Usage (run from Microbot-Launcher; all commands default to config/release-publication.staging.json,',
         'use --config config/release-publication.production.json for production):',
-        '  node scripts/publish-launcher-release.js prepare --version <v> --sequence <n> --candidate <dir> --validated-sha256 <hex>',
+        'The sequence of a new release is computed from the live manifest in R2 (live + 1); it is never typed.',
+        'prepare prints it, and stage, promote and verify take it back with --sequence to find the bundle.',
+        '  node scripts/publish-launcher-release.js prepare --version <v> --candidate <dir> --validated-sha256 <hex>',
         '        [--staging-candidate <dir>  (required for production)] [--minimum-supported <v>] [--staging-config <path>]',
-        '  node scripts/publish-launcher-release.js prepare-rollback --version <v> --source-sequence <n> --sequence <next>',
-        '  node scripts/publish-launcher-release.js prepare-withdraw --sequence <next>',
+        '  node scripts/publish-launcher-release.js prepare-rollback --version <v> --source-sequence <n>',
+        '  node scripts/publish-launcher-release.js prepare-withdraw',
         '  node scripts/publish-launcher-release.js stage   (--version <v> | --withdrawal) --sequence <n> [--resume] [--dry-run]',
         '  node scripts/publish-launcher-release.js promote (--version <v> | --withdrawal) --sequence <n> --confirm-promote [--dry-run]',
         '  node scripts/publish-launcher-release.js verify  (--version <v> | --withdrawal) --sequence <n>'
@@ -72,9 +74,12 @@ function parseArguments(argv) {
         index += 1;
     }
 
-    options.sequence = Number(options.sequence);
-    if (!Number.isSafeInteger(options.sequence) || options.sequence <= 0) {
-        throw new Error('release sequence must be a positive safe integer');
+    const locatesBundle = ['stage', 'promote', 'verify'].includes(command);
+    if (locatesBundle) {
+        options.sequence = Number(options.sequence);
+        if (!Number.isSafeInteger(options.sequence) || options.sequence <= 0) {
+            throw new Error('release sequence must be a positive safe integer');
+        }
     }
     const needsVersion = ['prepare', 'prepare-rollback'].includes(command) ||
         (['stage', 'promote', 'verify'].includes(command) && !options.withdrawal);
@@ -95,9 +100,6 @@ function parseArguments(argv) {
         if (!Number.isSafeInteger(options['source-sequence']) || options['source-sequence'] <= 0) {
             throw new Error('prepare-rollback requires a positive --source-sequence');
         }
-        if (options.sequence <= options['source-sequence']) {
-            throw new Error('rollback sequence must be greater than source sequence');
-        }
     }
     return { command, options };
 }
@@ -115,16 +117,13 @@ function loadStagingConfiguration(options) {
 function readBundle(config, options) {
     if (options.withdrawal) {
         const directory = launcherRelease.launcherWithdrawalDirectory(deps.workRoot, config.channel, options.sequence);
-        return {
-            kind: 'withdrawal',
-            directory,
-            ...launcherRelease.readAndVerifyLauncherWithdrawal({
-                outputDirectory: directory,
-                channel: config.channel,
-                keyId: config.keyId,
-                publicKey: config.publicKey
-            })
-        };
+        const bundle = launcherRelease.readAndVerifyLauncherWithdrawal({
+            outputDirectory: directory,
+            channel: config.channel,
+            keyId: config.keyId,
+            publicKey: config.publicKey
+        });
+        return { kind: 'withdrawal', directory, base: ops.requireBase(bundle.metadata), ...bundle };
     }
     const directory = launcherRelease.launcherBundleDirectory(
         deps.workRoot,
@@ -132,16 +131,13 @@ function readBundle(config, options) {
         options.version,
         options.sequence
     );
-    return {
-        kind: 'launcher',
-        directory,
-        ...launcherRelease.readAndVerifyLauncherBundle({
-            outputDirectory: directory,
-            channel: config.channel,
-            keyId: config.keyId,
-            publicKey: config.publicKey
-        })
-    };
+    const bundle = launcherRelease.readAndVerifyLauncherBundle({
+        outputDirectory: directory,
+        channel: config.channel,
+        keyId: config.keyId,
+        publicKey: config.publicKey
+    });
+    return { kind: 'launcher', directory, base: ops.requireBase(bundle.metadata), ...bundle };
 }
 
 // The objects a bundle writes, in upload order. The candidate manifest is last: its presence marks
@@ -175,25 +171,6 @@ function requireOwnKeys(config, bundle) {
         launcherRelease.requireAllowedLauncherWriteKey(config.channel, spec.key, context);
     }
     launcherRelease.requireAllowedLauncherWriteKey(config.channel, bundle.metadata.manifestObjectKey, context);
-}
-
-function sameFile(left, right) {
-    return fs.statSync(left).size === fs.statSync(right).size && sha256File(left) === sha256File(right);
-}
-
-// The live manifest is read from R2 itself (the authority the Worker reads), never through the edge,
-// and verified against the channel key.
-function readLiveFromR2(config, temporaryDirectory, label) {
-    const destination = path.join(temporaryDirectory, `live-${label}.json`);
-    const manifestKey = `releases/${config.channel}/manifest.json`;
-    if (!deps.r2Get(config, manifestKey, destination, { allowMissing: true })) return null;
-    const bytes = fs.readFileSync(destination);
-    const envelope = JSON.parse(bytes.toString('utf8'));
-    const payload = verifyReleaseManifest(envelope, {
-        expectedChannel: config.channel,
-        trustedKeys: { [config.keyId]: config.publicKey }
-    });
-    return { bytes, envelope, payload };
 }
 
 // Fail closed: the installer must not become reachable through an older Worker. A Worker that has
@@ -234,8 +211,12 @@ async function requireSiteRoutes(config) {
     }
 }
 
-// Everything that has to hold against the live manifest for this bundle to be published now.
-async function checkAgainstLive(config, options, bundle, current) {
+// Everything that has to hold against the live manifest for this bundle to be published now. The
+// bundle must still be based on the live manifest (same ETag); the other checks then explain, in
+// release terms, what the manifest and the bundle disagree about.
+async function checkAgainstLive(config, options, bundle, live) {
+    ops.requireLiveMatchesBase(live, bundle.base);
+    const current = live && live.payload;
     requireNewerSequence(bundle.payload, current);
     launcherRelease.requireLauncherReleaseKeepsClient(bundle.payload, current);
     if (bundle.kind === 'launcher' && !bundle.metadata.reusesArtifact) {
@@ -247,13 +228,28 @@ async function checkAgainstLive(config, options, bundle, current) {
     }
 }
 
+// The state every prepare is based on: the live manifest in R2 itself, with its ETag. The next
+// sequence is computed from it. A launcher needs the client entry the manifest already has.
 async function prepareContext(config) {
-    const live = await deps.liveManifest(config, { allowMissing: true });
+    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
     if (!live) {
         throw new Error('this channel has no live manifest; publish a client release first (the manifest requires a client entry)');
     }
     return live;
 }
+
+function recordBaseOrDiscard(directory, live) {
+    try {
+        ops.recordBase(directory, live);
+    } catch (error) {
+        fs.rmSync(directory, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+const baseLine = (live, sequence) =>
+    `Sequence: ${sequence} (live sequence ${live.payload.sequence} + 1)\n` +
+    `Based on live ETag: ${live.etag}\n`;
 
 async function prepare(config, options) {
     const candidateDirectory = path.resolve(launcherRoot, options.candidate);
@@ -274,8 +270,8 @@ async function prepare(config, options) {
     }
 
     const live = await prepareContext(config);
-    requireNewerSequence({ sequence: options.sequence }, live);
-    launcherRelease.requireNewerLauncherVersion({ launcher: { version: options.version } }, live);
+    const sequence = ops.nextSequence(live);
+    launcherRelease.requireNewerLauncherVersion({ launcher: { version: options.version } }, live.payload);
     if (stagingCandidate) {
         const stagingLive = await deps.liveManifest(loadStagingConfiguration(options), { allowMissing: true });
         launcherRelease.requireStagingPublished(stagingLive, stagingCandidate);
@@ -296,7 +292,7 @@ async function prepare(config, options) {
         deps.workRoot,
         config.channel,
         options.version,
-        options.sequence
+        sequence
     );
     const result = launcherRelease.prepareLauncherRelease({
         installerPath,
@@ -304,8 +300,8 @@ async function prepare(config, options) {
         channel: config.channel,
         version: options.version,
         minimumSupportedVersion,
-        sequence: options.sequence,
-        currentClient: live.client,
+        sequence,
+        currentClient: live.payload.client,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey,
@@ -313,88 +309,66 @@ async function prepare(config, options) {
         stagingCandidate,
         validatedSha256: options['validated-sha256']
     });
+    recordBaseOrDiscard(outputDirectory, live);
     const entry = result.payload.launcher.platforms[launcherRelease.LAUNCHER_PLATFORM];
     process.stdout.write(
-        `Prepared launcher ${options.version} sequence ${options.sequence} for ${config.channel}\n` +
+        `Prepared launcher ${options.version} for ${config.channel}\n` +
+        baseLine(live, sequence) +
         `Size: ${entry.size} bytes\n` +
         `SHA-256: ${entry.sha256}\n` +
         `Source commit: ${candidate.sourceCommit}\n` +
         `Minimum supported launcher: ${minimumSupportedVersion} (from ${minimumSource})\n` +
-        `Client entry carried over: ${live.client.version}\n` +
+        `Client entry carried over: ${live.payload.client.version}\n` +
         `Bundle: ${outputDirectory}\n`
     );
 }
 
 async function prepareRollback(config, options) {
     const live = await prepareContext(config);
-    requireNewerSequence({ sequence: options.sequence }, live);
+    const sequence = ops.nextSequence(live);
+    const outputDirectory = launcherRelease.launcherBundleDirectory(deps.workRoot, config.channel, options.version, sequence);
     const result = launcherRelease.prepareLauncherRollback({
         sourceDirectory: launcherRelease.launcherBundleDirectory(deps.workRoot, config.channel, options.version, options['source-sequence']),
-        outputDirectory: launcherRelease.launcherBundleDirectory(deps.workRoot, config.channel, options.version, options.sequence),
+        outputDirectory,
         channel: config.channel,
-        sequence: options.sequence,
-        currentClient: live.client,
+        sequence,
+        currentClient: live.payload.client,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey
     });
+    recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
-        `Prepared launcher rollback to ${options.version} at sequence ${options.sequence}\n` +
+        `Prepared launcher rollback to ${options.version}\n` +
+        baseLine(live, sequence) +
         `Reused sequence: ${result.source.payload.sequence}\n` +
-        `Client entry carried over: ${live.client.version}\n` +
+        `Client entry carried over: ${live.payload.client.version}\n` +
         'It does not downgrade launchers that are already installed; it changes what the Download page serves.\n'
     );
 }
 
 async function prepareWithdraw(config, options) {
     const live = await prepareContext(config);
-    requireNewerSequence({ sequence: options.sequence }, live);
+    const sequence = ops.nextSequence(live);
+    const outputDirectory = launcherRelease.launcherWithdrawalDirectory(deps.workRoot, config.channel, sequence);
     launcherRelease.prepareLauncherWithdrawal({
-        outputDirectory: launcherRelease.launcherWithdrawalDirectory(deps.workRoot, config.channel, options.sequence),
+        outputDirectory,
         channel: config.channel,
-        sequence: options.sequence,
-        currentClient: live.client,
+        sequence,
+        currentClient: live.payload.client,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey
     });
+    recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
-        `Prepared launcher withdrawal at sequence ${options.sequence}: the Download page will report the installer as unavailable.\n`
+        'Prepared launcher withdrawal: the Download page will report the installer as unavailable.\n' +
+        baseLine(live, sequence)
     );
 }
 
-// An immutable object is written once. R2 does not enforce that for wrangler uploads, so the object
-// is looked up first, written only when absent, and always read back and compared byte for byte.
-function ensureObject(config, options, temporaryDirectory, spec, report) {
-    const existing = path.join(temporaryDirectory, `existing-${spec.name}`);
-    if (deps.r2Get(config, spec.key, existing, { allowMissing: true })) {
-        if (!sameFile(existing, spec.file)) {
-            throw new Error(`R2 object ${spec.key} differs from the local bundle; it is never overwritten`);
-        }
-        if (!spec.reuse && !options.resume) {
-            throw new Error(`immutable object already exists in R2: ${spec.key}; use --resume only to verify it`);
-        }
-        report.push(`verified existing ${spec.name}: ${spec.key}`);
-        return;
-    }
-    if (spec.reuse) throw new Error(`known-good launcher object is no longer available in R2: ${spec.key}`);
-    const size = fs.statSync(spec.file).size;
-    if (options['dry-run']) {
-        report.push(`would upload ${spec.name}: ${spec.key} (${size} bytes)`);
-        return;
-    }
-    deps.r2Put(config, spec.key, spec.file, spec.contentType);
-    const readback = path.join(temporaryDirectory, `readback-${spec.name}`);
-    if (!deps.r2Get(config, spec.key, readback, { allowMissing: true })) {
-        throw new Error(`R2 object ${spec.key} is missing right after the upload`);
-    }
-    if (!sameFile(readback, spec.file)) {
-        throw new Error(
-            `R2 read-back of ${spec.key} failed size or SHA-256 verification. The object was left in place and ` +
-            'must not be used; the manifest was not changed. Investigate, then publish under a new version.'
-        );
-    }
-    report.push(`uploaded and verified ${spec.name}: ${spec.key} (${size} bytes)`);
+function describe(bundle, options) {
+    return bundle.kind === 'withdrawal' ? 'launcher withdrawal' : `launcher ${options.version}`;
 }
 
 async function stage(config, options) {
@@ -403,33 +377,36 @@ async function stage(config, options) {
     if (bundle.metadata.sourceDirty) {
         throw new Error('refusing to stage a release prepared from an uncommitted working tree');
     }
-    if (bundle.kind === 'launcher' && !bundle.metadata.reusesArtifact && bundle.metadata.size > MAX_WRANGLER_UPLOAD_BYTES) {
-        throw new Error(`the installer is larger than the ${MAX_WRANGLER_UPLOAD_BYTES}-byte limit of wrangler uploads`);
+    if (bundle.kind === 'launcher' && !bundle.metadata.reusesArtifact && bundle.metadata.size > ops.MAX_SINGLE_PUT_BYTES) {
+        throw new Error(`the installer is larger than the ${ops.MAX_SINGLE_PUT_BYTES}-byte single-request upload limit`);
     }
+    const dryRun = Boolean(options['dry-run']);
+    const store = deps.openStore(config, { writable: !dryRun });
     const report = [];
-    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-launcher-stage-'));
-    try {
-        const live = readLiveFromR2(config, temporaryDirectory, 'stage');
-        await checkAgainstLive(config, options, bundle, live && live.payload);
-        await requireSiteRoutes(config);
-        for (const spec of bundleObjects(bundle)) {
-            ensureObject(config, options, temporaryDirectory, spec, report);
-        }
-    } finally {
-        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    const live = await ops.readLiveManifest(store, config);
+    await checkAgainstLive(config, options, bundle, live);
+    await requireSiteRoutes(config);
+    for (const spec of bundleObjects(bundle)) {
+        const result = await ops.putImmutable(store, {
+            key: spec.key,
+            file: spec.file,
+            contentType: spec.contentType,
+            name: spec.name,
+            resume: Boolean(options.resume),
+            reuse: spec.reuse,
+            dryRun
+        });
+        const verb = { verified: 'verified existing', uploaded: 'uploaded and verified', 'would-upload': 'would upload' }[result.action];
+        report.push(`${verb} ${spec.name}: ${spec.key} (${result.size} bytes)`);
     }
     process.stdout.write(`${report.join('\n')}\n`);
-    process.stdout.write(options['dry-run']
+    process.stdout.write(dryRun
         ? 'Dry run: nothing was written to R2.\n'
         : `Staged immutable ${describe(bundle, options)} sequence ${options.sequence}; the live channel was not changed.\n`);
 }
 
-function describe(bundle, options) {
-    return bundle.kind === 'withdrawal' ? 'launcher withdrawal' : `launcher ${options.version}`;
-}
-
 // The public manifest and, for a launcher, the authoritative R2 objects, must all match the bundle.
-async function verifyPublicRelease(config, bundle, temporaryDirectory, { checkObjects }) {
+async function verifyPublicRelease(config, bundle, store, { checkObjects }) {
     const current = await deps.liveManifest(config);
     if (launcherRelease.canonicalJson(current) !== launcherRelease.canonicalJson(bundle.payload)) {
         throw new Error('public manifest does not match the selected release bundle');
@@ -442,11 +419,9 @@ async function verifyPublicRelease(config, bundle, temporaryDirectory, { checkOb
     }
     if (checkObjects) {
         for (const spec of bundleObjects(bundle).slice(0, 2)) {
-            const readback = path.join(temporaryDirectory, `verify-${spec.name}`);
-            if (!deps.r2Get(config, spec.key, readback, { allowMissing: true })) {
-                throw new Error(`R2 object ${spec.key} is missing`);
-            }
-            if (!sameFile(readback, spec.file)) {
+            const remote = await store.get(spec.key);
+            if (!remote.found) throw new Error(`R2 object ${spec.key} is missing`);
+            if (!ops.sameBytes(remote.bytes, fs.readFileSync(spec.file))) {
                 throw new Error(`R2 object ${spec.key} does not match the release bundle`);
             }
         }
@@ -459,110 +434,77 @@ async function promote(config, options) {
     if (!dryRun && !options['confirm-promote']) throw new Error('promotion requires --confirm-promote');
     const bundle = readBundle(config, options);
     requireOwnKeys(config, bundle);
-    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-launcher-promote-'));
+    const store = deps.openStore(config, { writable: !dryRun });
+    await requireSiteRoutes(config);
+    const live = await ops.readLiveManifest(store, config);
+    await checkAgainstLive(config, options, bundle, live);
+
+    // 1. Every launcher object is in R2 with the exact bytes of the bundle.
+    for (const spec of bundleObjects(bundle).slice(0, -1)) {
+        const remote = await store.get(spec.key);
+        if (!remote.found) throw new Error(`${spec.name} is not staged in R2: ${spec.key}`);
+        if (!ops.sameBytes(remote.bytes, fs.readFileSync(spec.file))) {
+            throw new Error(`staged ${spec.name} does not match the local release bundle`);
+        }
+    }
+
+    // 2. The staged candidate manifest is the signed manifest of this bundle. Its bytes, read back
+    // from R2, are what is written to the live key.
+    const staged = await store.get(bundle.metadata.candidateObjectKey);
+    if (!staged.found) throw new Error('candidate manifest is not staged');
+    const candidateEnvelope = JSON.parse(staged.bytes.toString('utf8'));
+    const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
+        expectedChannel: config.channel,
+        trustedKeys: { [config.keyId]: config.publicKey }
+    });
+    if (
+        candidatePayload.sequence !== bundle.payload.sequence ||
+        launcherRelease.canonicalJson(candidateEnvelope) !== launcherRelease.canonicalJson(bundle.envelope)
+    ) {
+        throw new Error('staged candidate does not match the local release bundle');
+    }
+
+    if (dryRun) {
+        process.stdout.write(
+            `Dry run: ${describe(bundle, options)} sequence ${options.sequence} passed every check; ` +
+            `it would replace ${live ? `live sequence ${live.payload.sequence}` : 'a missing manifest'} on ${config.channel}, ` +
+            `written only if the live ETag is still ${bundle.base.etag}. Nothing was written.\n`
+        );
+        return;
+    }
+
+    // 3. The only write that changes what users see. It carries If-Match with the ETag of the manifest
+    // this bundle was prepared against, so R2 itself refuses it if anything else was published since.
+    // A conflict stops here: it is not retried and nothing is overwritten.
     try {
-        await requireSiteRoutes(config);
-        const first = readLiveFromR2(config, temporaryDirectory, 'first');
-        await checkAgainstLive(config, options, bundle, first && first.payload);
+        await ops.promoteManifest(store, config, { bytes: staged.bytes, base: bundle.base });
+    } catch (error) {
+        if (error instanceof ops.PublicationConflictError || error instanceof ops.WriteNotAppliedError) throw error;
+        throw new Error(
+            `${error.message}. The manifest write was attempted and the release may already be live. ` +
+            'Run verify. To revert, prepare a rollback or a withdrawal (a higher sequence); never lower the sequence.'
+        );
+    }
 
-        // 1. Every launcher object is in R2 with the exact bytes of the bundle.
-        const objects = bundleObjects(bundle);
-        for (const spec of objects.slice(0, -1)) {
-            const readback = path.join(temporaryDirectory, `object-${spec.name}`);
-            if (!deps.r2Get(config, spec.key, readback, { allowMissing: true })) {
-                throw new Error(`${spec.name} is not staged in R2: ${spec.key}`);
-            }
-            if (!sameFile(readback, spec.file)) {
-                throw new Error(`staged ${spec.name} does not match the local release bundle`);
-            }
-        }
-
-        // 2. The staged candidate manifest is the signed manifest of this bundle. Its bytes, read
-        // back from R2, are what is written to the live key.
-        const candidate = path.join(temporaryDirectory, 'candidate.json');
-        if (!deps.r2Get(config, bundle.metadata.candidateObjectKey, candidate, { allowMissing: true })) {
-            throw new Error('candidate manifest is not staged');
-        }
-        const candidateEnvelope = readJson(candidate);
-        const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
-            expectedChannel: config.channel,
-            trustedKeys: { [config.keyId]: config.publicKey }
-        });
-        if (
-            candidatePayload.sequence !== bundle.payload.sequence ||
-            launcherRelease.canonicalJson(candidateEnvelope) !== launcherRelease.canonicalJson(bundle.envelope)
-        ) {
-            throw new Error('staged candidate does not match the local release bundle');
-        }
-
-        // 3. Last look: the live manifest must be byte-identical to the one every check used.
-        const second = readLiveFromR2(config, temporaryDirectory, 'second');
-        const unchanged = (first === null && second === null) ||
-            (first !== null && second !== null && Buffer.compare(first.bytes, second.bytes) === 0);
-        if (!unchanged) {
-            throw new Error('the live manifest changed during the promotion; nothing was written. Check what was published, then prepare again');
-        }
-        if (dryRun) {
-            process.stdout.write(
-                `Dry run: ${describe(bundle, options)} sequence ${options.sequence} passed every check; ` +
-                `it would replace ${first ? `live sequence ${first.payload.sequence}` : 'a missing manifest'} on ${config.channel}. Nothing was written.\n`
-            );
-            return;
-        }
-
-        // 4. The only write that changes what users see.
-        try {
-            deps.r2Put(config, bundle.metadata.manifestObjectKey, candidate, 'application/json');
-        } catch (error) {
-            throw new Error(
-                `the manifest write failed (${error.message}). The live manifest may or may not have changed: ` +
-                `run verify (or read ${bundle.metadata.manifestObjectKey}) before doing anything else`
-            );
-        }
-
-        // 5. Read it back from R2, then from the public edge.
-        try {
-            const written = readLiveFromR2(config, temporaryDirectory, 'after');
-            if (!written || Buffer.compare(written.bytes, fs.readFileSync(candidate)) !== 0) {
-                const found = written ? `live sequence ${written.payload.sequence}` : 'no manifest';
-                throw new Error(`the live manifest is not the one written (${found}); another publication may have replaced it`);
-            }
-            await verifyPublicRelease(config, bundle, temporaryDirectory, { checkObjects: false });
-        } catch (error) {
-            throw new Error(
-                `${error.message}. The manifest write was attempted and the release may already be live. ` +
-                'Run verify. To revert, prepare a rollback or a withdrawal (a higher sequence); never lower the sequence.'
-            );
-        }
-    } finally {
-        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    // 4. The public edge serves what R2 now holds.
+    try {
+        await verifyPublicRelease(config, bundle, store, { checkObjects: false });
+    } catch (error) {
+        throw new Error(
+            `${error.message}. The manifest was written and the release is live in R2. ` +
+            'Run verify (the public edge caches the manifest for up to a minute). To revert, prepare a rollback or a withdrawal (a higher sequence); never lower the sequence.'
+        );
     }
     process.stdout.write(`Promoted ${describe(bundle, options)} sequence ${options.sequence} to ${config.channel}.\n`);
 }
 
 async function verify(config, options) {
     const bundle = readBundle(config, options);
-    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-launcher-verify-'));
-    try {
-        await verifyPublicRelease(config, bundle, temporaryDirectory, { checkObjects: true });
-    } finally {
-        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
-    }
+    await verifyPublicRelease(config, bundle, deps.openStore(config, { writable: false }), { checkObjects: true });
     process.stdout.write(
         `Verified ${config.channel} ${describe(bundle, options)} sequence ${options.sequence}: manifest, R2 objects and closed public prefix.\n` +
         'The authenticated download itself needs a signed-in session and is checked in the browser.\n'
     );
-}
-
-// While a dry run is active a write is a bug, not a setting.
-function refuseWrites() {
-    const original = deps.r2Put;
-    deps.r2Put = (cfg, key) => {
-        throw new Error(`a dry run attempted to write ${key}`);
-    };
-    return () => {
-        deps.r2Put = original;
-    };
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -573,14 +515,10 @@ async function main(argv = process.argv.slice(2)) {
     if (command === 'prepare-withdraw') return prepareWithdraw(config, options);
     if (command === 'verify') return verify(config, options);
     const run = command === 'stage' ? stage : promote;
-    if (options['dry-run']) {
-        const restore = refuseWrites();
-        try {
-            return await run(config, options);
-        } finally {
-            restore();
-        }
-    }
+    // A dry run writes nothing and so needs no lock; its store is opened read-only.
+    if (options['dry-run']) return run(config, options);
+    // The lock keeps two publications of this machine apart. Across machines the ETag condition on
+    // every write is what protects the channel.
     const release = acquirePublicationLock(deps.workRoot, config.channel, `launcher ${command} ${options.version || 'withdrawal'}`);
     try {
         return await run(config, options);

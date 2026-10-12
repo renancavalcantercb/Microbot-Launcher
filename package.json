@@ -26,6 +26,7 @@
     "release:manifest:sign": "node scripts/sign-release-manifest.js",
     "release:client": "node scripts/publish-client-release.js",
     "release:launcher": "node scripts/publish-launcher-release.js",
+    "release:probe": "node scripts/probe-r2-conditional-writes.js",
     "linux": "electron-builder --linux",
     "mac": "electron-builder --mac"
   },

@@ -1,4 +1,3 @@
-const childProcess = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -6,12 +5,15 @@ const path = require('path');
 
 const cli = require('../scripts/publish-launcher-release');
 const io = require('../libs/release-publication-io');
+const ops = require('../libs/release-store-ops');
+const { createR2Store } = require('../libs/r2-store');
+const { createMemoryFetch, createMemoryR2 } = require('./helpers/memory-r2');
 const launcherRelease = require('../libs/launcher-release-publication');
 const { verifyReleaseManifest } = require('../libs/release-manifest');
 const { signReleaseManifest } = require('../libs/release-manifest-signing');
 
-// The CLI is exercised against an in-memory R2 and a fake edge. Nothing here reaches the network,
-// wrangler or a real bucket.
+// The CLI is exercised against an in-memory R2 (with real ETag and conditional-write semantics) and a
+// fake edge. Nothing here reaches the network or a real bucket.
 
 const VERSION = '3.2.11';
 const FILE_NAME = `Microbot-Cut-Launcher-Setup-${VERSION}.exe`;
@@ -56,7 +58,12 @@ describe('launcher publication CLI', () => {
     let original;
     let output;
 
+    let memory;
     const bucketKey = (name, key) => `${channels[name].config.bucket}/${key}`;
+    const splitFull = (full) => {
+        const slash = full.indexOf('/');
+        return [full.slice(0, slash), full.slice(slash + 1)];
+    };
     const manifestKey = (name) => bucketKey(name, `releases/${name}/manifest.json`);
     const candidateKey = (name, sequence) => bucketKey(name, `releases/${name}/candidates/sequence-${sequence}-manifest.json`);
     const config = (name) => channels[name].config;
@@ -102,6 +109,18 @@ describe('launcher publication CLI', () => {
         world.r2.set(manifestKey(name), Buffer.from(`${JSON.stringify(envelope, null, 2)}\n`));
     }
 
+    // Points a bundle at the live manifest as it is now. Used to reach the checks that sit behind the
+    // base-ETag check (sequence, entries) when the manifest was changed after the bundle was prepared.
+    function rebase(name, options, kind = 'launcher') {
+        const directory = kind === 'withdrawal'
+            ? launcherRelease.launcherWithdrawalDirectory(cli.deps.workRoot, name, options.sequence)
+            : launcherRelease.launcherBundleDirectory(cli.deps.workRoot, name, options.version, options.sequence);
+        const file = path.join(directory, 'release.json');
+        const release = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const live = liveOf(name);
+        fs.writeFileSync(file, JSON.stringify({ ...release, base: { etag: memory.etag(config(name).bucket, `releases/${name}/manifest.json`), sequence: live.sequence } }));
+    }
+
     function liveOf(name) {
         const bytes = world.r2.get(manifestKey(name));
         if (!bytes) return null;
@@ -125,7 +144,6 @@ describe('launcher publication CLI', () => {
 
     const prepareOptions = (name, extra = {}) => ({
         version: VERSION,
-        sequence: name === 'staging' ? 5 : 3,
         candidate: candidateDir(name),
         'validated-sha256': candidates[name].sha256,
         ...(name === 'production'
@@ -160,13 +178,17 @@ describe('launcher publication CLI', () => {
         fs.writeFileSync(path.join(directory, 'backend', 'node_modules', 'wrangler', 'bin', 'wrangler.js'), '');
         channels = { staging: makeChannel('staging'), production: makeChannel('production') };
         candidates = { staging: makeCandidate('staging'), production: makeCandidate('production') };
+        memory = createMemoryR2();
         world = {
-            r2: new Map(),
+            // a Map-like view of the memory bucket, keyed by `bucket/key`
+            r2: {
+                get: (full) => memory.bytes(...splitFull(full)),
+                set: (full, bytes) => memory.seed(...splitFull(full), bytes),
+                has: (full) => memory.has(...splitFull(full)),
+                delete: (full) => memory.delete(...splitFull(full))
+            },
             writes: [],
             gets: [],
-            putHook: null,
-            afterPut: null,
-            getHook: null,
             edgeFrozen: null,
             site: {
                 download: { status: 401, code: 'unauthorized' },
@@ -174,6 +196,8 @@ describe('launcher publication CLI', () => {
                 publicInstaller: 404
             }
         };
+        // `writes` lists the writes R2 applied; `gets` the reads.
+        memory.after = (op, bucket, key) => world.writes.push(`${bucket}/${key}`);
         seedManifest('staging', { sequence: 4 });
         seedManifest('production', { sequence: 2 });
 
@@ -199,24 +223,7 @@ describe('launcher publication CLI', () => {
                 if (pathname.includes('/releases/artifacts/launcher/')) return respond({ status: world.site.publicInstaller });
                 throw new Error(`unexpected request: ${url}`);
             }),
-            r2Get: jest.fn((cfg, key, destination, { allowMissing = false } = {}) => {
-                const full = `${cfg.bucket}/${key}`;
-                world.gets.push(full);
-                if (world.getHook) world.getHook(full);
-                if (!world.r2.has(full)) {
-                    if (allowMissing) return false;
-                    throw new Error(`Wrangler failed: ${full} missing`);
-                }
-                fs.writeFileSync(destination, world.r2.get(full));
-                return true;
-            }),
-            r2Put: jest.fn((cfg, key, file) => {
-                const full = `${cfg.bucket}/${key}`;
-                if (world.putHook) world.putHook(full);
-                world.writes.push(full);
-                world.r2.set(full, fs.readFileSync(file));
-                if (world.afterPut) world.afterPut(full);
-            })
+            openStore: jest.fn((cfg, { writable = true } = {}) => memory.store(cfg.bucket, { writable }))
         });
         output = [];
         jest.spyOn(process.stdout, 'write').mockImplementation((text) => {
@@ -235,11 +242,11 @@ describe('launcher publication CLI', () => {
         const parse = (...argv) => cli.parseArguments(argv);
 
         test('accepts the documented commands', () => {
-            expect(parse('prepare', '--version', VERSION, '--sequence', '5', '--candidate', 'x', '--validated-sha256', 'a'.repeat(64)).options.sequence).toBe(5);
+            expect(parse('prepare', '--version', VERSION, '--candidate', 'x', '--validated-sha256', 'a'.repeat(64)).options.sequence).toBeUndefined();
             expect(parse('stage', '--version', VERSION, '--sequence', '5', '--resume', '--dry-run').options).toMatchObject({ resume: true, 'dry-run': true });
             expect(parse('promote', '--withdrawal', '--sequence', '7', '--confirm-promote').options.withdrawal).toBe(true);
-            expect(parse('prepare-withdraw', '--sequence', '8').options.sequence).toBe(8);
-            expect(parse('prepare-rollback', '--version', VERSION, '--source-sequence', '5', '--sequence', '6').options['source-sequence']).toBe(5);
+            expect(parse('prepare-withdraw').options).toEqual({});
+            expect(parse('prepare-rollback', '--version', VERSION, '--source-sequence', '5').options['source-sequence']).toBe(5);
         });
 
         test.each([
@@ -251,9 +258,11 @@ describe('launcher publication CLI', () => {
             ['a bad version', ['stage', '--version', '3.2', '--sequence', '5']],
             ['no version', ['stage', '--sequence', '5']],
             ['a withdrawal with a version', ['stage', '--withdrawal', '--version', VERSION, '--sequence', '5']],
-            ['a prepare without the validated hash', ['prepare', '--version', VERSION, '--sequence', '5', '--candidate', 'x']],
-            ['a malformed validated hash', ['prepare', '--version', VERSION, '--sequence', '5', '--candidate', 'x', '--validated-sha256', 'ABC']],
-            ['a rollback to a higher source', ['prepare-rollback', '--version', VERSION, '--source-sequence', '6', '--sequence', '5']],
+            ['a prepare without the validated hash', ['prepare', '--version', VERSION, '--candidate', 'x']],
+            ['a malformed validated hash', ['prepare', '--version', VERSION, '--candidate', 'x', '--validated-sha256', 'ABC']],
+            ['a typed sequence on prepare', ['prepare', '--version', VERSION, '--sequence', '5', '--candidate', 'x', '--validated-sha256', 'a'.repeat(64)]],
+            ['a typed sequence on prepare-rollback', ['prepare-rollback', '--version', VERSION, '--source-sequence', '5', '--sequence', '6']],
+            ['a typed sequence on prepare-withdraw', ['prepare-withdraw', '--sequence', '8']],
             ['a stray argument', ['stage', 'extra']]
         ])('refuses %s', (_label, argv) => {
             expect(() => cli.parseArguments(argv)).toThrow();
@@ -271,13 +280,37 @@ describe('launcher publication CLI', () => {
             expect(output.join('')).toContain('Minimum supported launcher: 3.2.10');
         });
 
+        test('computes the sequence from the live manifest in R2 and records what the bundle is based on', async () => {
+            await cli.prepare(config('staging'), prepareOptions('staging'));
+            const bundle = readBundle('staging', { sequence: 5 });
+            expect(bundle.payload.sequence).toBe(5);
+            expect(bundle.metadata.base).toEqual({ etag: memory.etag('bucket-staging', 'releases/staging/manifest.json'), sequence: 4 });
+            expect(output.join('')).toContain('Sequence: 5 (live sequence 4 + 1)');
+            expect(output.join('')).toContain(`Based on live ETag: ${bundle.metadata.base.etag}`);
+        });
+
+        test('reads R2, not the cached edge, and never writes', async () => {
+            cli.deps.liveManifest.mockImplementation(async () => { throw new Error('the edge must not be used'); });
+            await cli.prepare(config('staging'), prepareOptions('staging'));
+            expect(memory.log.some((entry) => entry.op === 'get' && entry.key === 'releases/staging/manifest.json')).toBe(true);
+            expect(memory.log.filter((entry) => entry.op.startsWith('put'))).toEqual([]);
+            expect(cli.deps.openStore).toHaveBeenCalledWith(expect.anything(), { writable: false });
+        });
+
+        test('a sequence typed by hand is not possible and prepare picks the next one when the channel moved', async () => {
+            seedManifest('staging', { sequence: 7 });
+            await cli.prepare(config('staging'), prepareOptions('staging'));
+            expect(readBundle('staging', { sequence: 8 }).payload.sequence).toBe(8);
+        });
+
         test('reports where the minimum supported version came from', async () => {
-            await cli.prepare(config('staging'), prepareOptions('staging', { sequence: 5, 'minimum-supported': '3.2.11' }));
+            await cli.prepare(config('staging'), prepareOptions('staging', { 'minimum-supported': '3.2.11' }));
             expect(readBundle('staging', { sequence: 5 }).payload.launcher.minimumSupportedVersion).toBe('3.2.11');
             expect(output.join('')).toContain('(from --minimum-supported)');
 
             output.length = 0;
-            await cli.prepare({ ...config('staging'), minimumSupportedLauncherVersion: '3.2.10' }, prepareOptions('staging', { sequence: 6 }));
+            fs.rmSync(launcherRelease.launcherBundleDirectory(cli.deps.workRoot, 'staging', VERSION, 5), { recursive: true });
+            await cli.prepare({ ...config('staging'), minimumSupportedLauncherVersion: '3.2.10' }, prepareOptions('staging'));
             expect(output.join('')).toContain('minimumSupportedLauncherVersion in the configuration');
         });
 
@@ -287,8 +320,7 @@ describe('launcher publication CLI', () => {
             expect(fs.existsSync(path.join(cli.deps.workRoot, 'staging'))).toBe(false);
         });
 
-        test('needs a live manifest, a higher sequence and a newer launcher', async () => {
-            await expect(cli.prepare(config('staging'), prepareOptions('staging', { sequence: 4 }))).rejects.toThrow(/must be greater than live sequence/);
+        test('needs a live manifest and a newer launcher', async () => {
             seedManifest('staging', { sequence: 4, launcher: { ...liveLauncher(VERSION) } });
             await expect(cli.prepare(config('staging'), prepareOptions('staging'))).rejects.toThrow(/must be newer/);
             world.r2.delete(manifestKey('staging'));
@@ -353,8 +385,15 @@ describe('launcher publication CLI', () => {
             const bundle = readBundle('staging', { sequence: 5 });
             expect(world.r2.get(bucketKey('staging', KEYS.installer)).equals(fs.readFileSync(bundle.artifactFile))).toBe(true);
             expect(world.r2.get(bucketKey('staging', KEYS.updater)).toString('utf8')).toBe(fs.readFileSync(bundle.updaterFile, 'utf8'));
-            // every uploaded object was read back
-            for (const key of world.writes) expect(world.gets.filter((read) => read === key).length).toBeGreaterThanOrEqual(2);
+            // every uploaded object was read back, after it was written and from R2 itself
+            for (const key of world.writes) {
+                const [bucket, objectKey] = splitFull(key);
+                const written = memory.log.findIndex((entry) => entry.op === 'putIfAbsent' && entry.key === objectKey);
+                expect(memory.log.slice(written + 1).some((entry) => entry.op === 'get' && entry.key === objectKey)).toBe(true);
+                expect(bucket).toBe('bucket-staging');
+            }
+            // and every write was conditional on the object not existing
+            expect(memory.log.filter((entry) => entry.op.startsWith('put')).every((entry) => entry.condition.ifNoneMatch === true)).toBe(true);
             expect(world.r2.get(manifestKey('staging')).equals(before)).toBe(true);
             expect(output.join('')).toContain('the live channel was not changed');
         });
@@ -375,12 +414,7 @@ describe('launcher publication CLI', () => {
         });
 
         test('a failed upload is finished with --resume without touching what was already uploaded', async () => {
-            world.putHook = (full) => {
-                if (full.endsWith('latest.yml') && !world.failedOnce) {
-                    world.failedOnce = true;
-                    throw new Error('Wrangler failed: network down');
-                }
-            };
+            memory.failNext('put', (key) => key.endsWith('latest.yml'), { message: 'network down' });
             await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/network down/);
             expect(world.writes).toEqual([bucketKey('staging', KEYS.installer)]);
             expect(world.r2.has(candidateKey('staging', 5))).toBe(false);
@@ -402,17 +436,10 @@ describe('launcher publication CLI', () => {
         });
 
         test('a corrupted read-back stops the release before the next object and the manifest', async () => {
-            world.afterPut = (full) => {
-                if (full.endsWith('.exe')) {
-                    const bytes = Buffer.from(world.r2.get(full));
-                    bytes[0] ^= 0xff;
-                    world.r2.set(full, bytes);
-                }
-            };
+            memory.corruptNext((key) => key.endsWith('.exe'));
             await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/read-back .* failed size or SHA-256/);
             expect(world.writes).toEqual([bucketKey('staging', KEYS.installer)]);
             expect(liveOf('staging').sequence).toBe(4);
-            world.afterPut = null;
             await expect(cli.stage(config('staging'), releaseOptions('staging', { resume: true }))).rejects.toThrow(/never overwritten/);
         });
 
@@ -434,28 +461,39 @@ describe('launcher publication CLI', () => {
             expect(world.writes).toEqual([]);
         });
 
-        test('refuses an installer above the wrangler upload limit before any write', async () => {
+        test('refuses an installer above the single-request upload limit before any write', async () => {
             const file = path.join(cli.deps.workRoot, 'staging', 'sequence-5-launcher-3.2.11', 'release.json');
             const release = JSON.parse(fs.readFileSync(file, 'utf8'));
-            fs.writeFileSync(file, JSON.stringify({ ...release, size: io.MAX_WRANGLER_UPLOAD_BYTES + 1 }));
-            await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/limit of wrangler uploads/);
+            fs.writeFileSync(file, JSON.stringify({ ...release, size: ops.MAX_SINGLE_PUT_BYTES + 1 }));
+            await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/single-request upload limit/);
+            expect(world.writes).toEqual([]);
+        });
+
+        test('refuses when anything was published after the bundle was prepared, before any write', async () => {
+            seedManifest('staging', { sequence: 4, client: { ...OLD_CLIENT, size: 11 } });
+            const error = await cli.stage(config('staging'), releaseOptions('staging')).catch((failure) => failure);
+            expect(error).toBeInstanceOf(ops.PublicationConflictError);
+            expect(error.message).toMatch(/changed after this bundle was prepared.*Prepare a new candidate/s);
             expect(world.writes).toEqual([]);
         });
 
         test('refuses when the live sequence moved on', async () => {
             seedManifest('staging', { sequence: 5 });
+            rebase('staging', releaseOptions('staging'));
             await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/must be greater than live sequence 5/);
             expect(world.writes).toEqual([]);
         });
 
         test('refuses when the live client changed after the bundle was prepared', async () => {
             seedManifest('staging', { sequence: 4, client: { ...OLD_CLIENT, version: 'cut-2.6.31', sha256: 'f'.repeat(64) } });
+            rebase('staging', releaseOptions('staging'));
             await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/live client entry/);
             expect(world.writes).toEqual([]);
         });
 
         test('refuses a launcher that is not newer than the live one', async () => {
             seedManifest('staging', { sequence: 4, launcher: launcherEntryOf('3.2.12') });
+            rebase('staging', releaseOptions('staging'));
             await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/must be newer than the live launcher 3.2.12/);
             expect(world.writes).toEqual([]);
         });
@@ -569,53 +607,115 @@ describe('launcher publication CLI', () => {
 
         test('refuses when somebody published a higher sequence first', async () => {
             seedManifest('staging', { sequence: 5 });
+            rebase('staging', releaseOptions('staging'));
             await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/must be greater than live sequence 5/);
             expect(world.writes).toEqual([]);
         });
 
         test('refuses when the live client changed after staging', async () => {
             seedManifest('staging', { sequence: 4, client: { ...OLD_CLIENT, version: 'cut-2.6.31', sha256: 'f'.repeat(64) } });
+            rebase('staging', releaseOptions('staging'));
             await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/live client entry/);
             expect(world.writes).toEqual([]);
         });
 
-        test('writes nothing when the live manifest changes during the promotion', async () => {
-            let reads = 0;
-            world.getHook = (full) => {
-                if (full === manifestKey('staging')) {
-                    reads += 1;
-                    if (reads === 2) seedManifest('staging', { sequence: 9 });
+        test('writes the manifest only if it is still the one the bundle was based on (If-Match)', async () => {
+            const base = memory.etag('bucket-staging', 'releases/staging/manifest.json');
+            memory.log.length = 0;
+            await cli.promote(config('staging'), promoteOptions('staging'));
+            const [write] = memory.log.filter((entry) => entry.op.startsWith('put'));
+            expect(write).toMatchObject({ op: 'putIfMatch', key: 'releases/staging/manifest.json', condition: { ifMatch: base } });
+        });
+
+        test.each([[412], [409]])('a competing publication between the read and the write is a conflict (HTTP %i): nothing is overwritten or retried', async (status) => {
+            memory.conflictStatus = status;
+            memory.before = (op, bucket, key) => {
+                if (op === 'putIfMatch' && key === 'releases/staging/manifest.json') {
+                    memory.before = null;
+                    seedManifest('staging', { sequence: 9 });
                 }
             };
-            await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/changed during the promotion; nothing was written/);
+            const error = await cli.promote(config('staging'), promoteOptions('staging')).catch((failure) => failure);
+            expect(error).toBeInstanceOf(ops.PublicationConflictError);
+            expect(error.message).toMatch(/replaced while this promotion was running/);
+            expect(error.message).toMatch(/the live manifest is sequence 9/);
+            expect(error.message).toMatch(/Prepare a new candidate from the current state/);
             expect(world.writes).toEqual([]);
             expect(liveOf('staging').sequence).toBe(9);
+            expect(memory.log.filter((entry) => entry.op === 'putIfMatch')).toHaveLength(1);
         });
 
         test('detects a concurrent publisher that overwrites the manifest right after the write', async () => {
-            world.afterPut = (full) => {
-                if (full === manifestKey('staging')) seedManifest('staging', { sequence: 99 });
+            memory.after = (op, bucket, key) => {
+                if (key === 'releases/staging/manifest.json') seedManifest('staging', { sequence: 99 });
             };
             const error = await cli.promote(config('staging'), promoteOptions('staging')).catch((failure) => failure);
             expect(error).toBeInstanceOf(Error);
-            expect(error.message).toMatch(/live sequence 99/);
+            expect(error.message).toMatch(/not the one written/);
             expect(error.message).toMatch(/may already be live/);
             expect(error.message).toMatch(/rollback or a withdrawal/);
         });
 
-        test('a failed manifest write says the live state is uncertain and changes nothing locally', async () => {
-            world.putHook = (full) => {
-                if (full === manifestKey('staging')) throw new Error('Wrangler failed: 503');
-            };
-            await expect(cli.promote(config('staging'), promoteOptions('staging')))
-                .rejects.toThrow(/may or may not have changed/);
-            expect(liveOf('staging').sequence).toBe(4);
+        describe('a manifest write whose answer is lost', () => {
+            const isManifest = (key) => key === 'releases/staging/manifest.json';
+
+            test('not applied: the live manifest is unchanged and the same promote may be run again', async () => {
+                memory.failNext('put', isManifest, { message: 'socket hang up' });
+                const error = await cli.promote(config('staging'), promoteOptions('staging')).catch((failure) => failure);
+                expect(error).toBeInstanceOf(ops.WriteNotAppliedError);
+                expect(error.message).toMatch(/nothing was written/);
+                expect(liveOf('staging').sequence).toBe(4);
+                await cli.promote(config('staging'), promoteOptions('staging'));
+                expect(liveOf('staging').sequence).toBe(5);
+            });
+
+            test('applied: the live manifest is the candidate, so the promotion is recognised as done', async () => {
+                memory.failNext('put', isManifest, { apply: true, message: 'socket hang up' });
+                await cli.promote(config('staging'), promoteOptions('staging'));
+                expect(liveOf('staging').sequence).toBe(5);
+                expect(output.join('')).toContain('Promoted launcher 3.2.11 sequence 5 to staging');
+            });
+
+            test('overtaken: somebody else published meanwhile, so it is a conflict, not a success', async () => {
+                memory.failNext('put', isManifest, { message: 'socket hang up' });
+                memory.before = (op, bucket, key) => {
+                    if (op === 'putIfMatch' && isManifest(key)) {
+                        memory.before = null;
+                        seedManifest('staging', { sequence: 9 });
+                    }
+                };
+                const error = await cli.promote(config('staging'), promoteOptions('staging')).catch((failure) => failure);
+                expect(error).toBeInstanceOf(ops.PublicationConflictError);
+                expect(error.message).toMatch(/not the one this bundle was based on/);
+                expect(liveOf('staging').sequence).toBe(9);
+            });
+
+            test('and the live manifest cannot be read afterwards: says so and sends the operator to verify', async () => {
+                memory.failNext('put', isManifest, { message: 'socket hang up' });
+                let manifestReads = 0;
+                cli.deps.openStore.mockImplementation((cfg, opts) => {
+                    const store = memory.store(cfg.bucket, opts);
+                    return {
+                        ...store,
+                        // the first read is the promote's own; the second is the look after the lost answer
+                        get: async (key) => {
+                            if (isManifest(key)) {
+                                manifestReads += 1;
+                                if (manifestReads === 2) throw new Error('dns failure');
+                            }
+                            return store.get(key);
+                        }
+                    };
+                });
+                const error = await cli.promote(config('staging'), promoteOptions('staging')).catch((failure) => failure);
+                expect(error.message).toMatch(/may or may not have changed: run verify/);
+            });
         });
 
         test('reports a public edge that does not serve the new manifest', async () => {
             world.edgeFrozen = liveOf('staging');
             await expect(cli.promote(config('staging'), promoteOptions('staging')))
-                .rejects.toThrow(/public manifest does not match.*may already be live/s);
+                .rejects.toThrow(/public manifest does not match.*release is live in R2/s);
             expect(liveOf('staging').sequence).toBe(5);
         });
 
@@ -628,7 +728,7 @@ describe('launcher publication CLI', () => {
         test('cannot be promoted twice', async () => {
             await cli.promote(config('staging'), promoteOptions('staging'));
             world.writes.length = 0;
-            await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/must be greater than live sequence 5/);
+            await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/changed after this bundle was prepared/);
             expect(world.writes).toEqual([]);
         });
     });
@@ -691,7 +791,7 @@ describe('launcher publication CLI', () => {
             const record = { ...candidateFor('staging', bytes), version, file: name };
             fs.writeFileSync(path.join(dir, 'candidate.json'), JSON.stringify(record));
             await cli.prepare(config('staging'), {
-                version, sequence, candidate: dir, 'validated-sha256': record.sha256
+                version, candidate: dir, 'validated-sha256': record.sha256
             });
             await cli.stage(config('staging'), { version, sequence });
             await cli.promote(config('staging'), { version, sequence, 'confirm-promote': true });
@@ -703,7 +803,7 @@ describe('launcher publication CLI', () => {
             expect(liveOf('staging').launcher.version).toBe('3.2.12');
 
             world.writes.length = 0;
-            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5, sequence: 7 });
+            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5 });
             await cli.stage(config('staging'), { version: '3.2.11', sequence: 7 });
             expect(world.writes).toEqual([candidateKey('staging', 7)]);
             await cli.promote(config('staging'), { version: '3.2.11', sequence: 7, 'confirm-promote': true });
@@ -715,7 +815,7 @@ describe('launcher publication CLI', () => {
         test('a rollback needs the old objects to still be in R2', async () => {
             await publishLauncher(5, '3.2.11', crypto.randomBytes(1024));
             await publishLauncher(6, '3.2.12', crypto.randomBytes(1024));
-            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5, sequence: 7 });
+            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5 });
             world.r2.delete(bucketKey('staging', launcherRelease.launcherObjectKeys('3.2.11').installer));
             await expect(cli.stage(config('staging'), { version: '3.2.11', sequence: 7 })).rejects.toThrow(/no longer available/);
             expect(world.writes.filter((full) => full.includes('sequence-7'))).toEqual([]);
@@ -726,16 +826,17 @@ describe('launcher publication CLI', () => {
             await publishLauncher(6, '3.2.12', crypto.randomBytes(1024));
             const newClient = { ...OLD_CLIENT, version: 'cut-2.6.31', sha256: '1'.repeat(64) };
             seedManifest('staging', { sequence: 7, launcher: liveOf('staging').launcher, client: newClient });
-            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5, sequence: 8 });
+            await cli.prepareRollback(config('staging'), { version: '3.2.11', 'source-sequence': 5 });
             expect(readBundle('staging', { sequence: 8 }).payload.client).toEqual(newClient);
             seedManifest('staging', { sequence: 7, launcher: liveOf('staging').launcher, client: { ...newClient, sha256: '2'.repeat(64) } });
+            rebase('staging', { version: '3.2.11', sequence: 8 });
             await expect(cli.stage(config('staging'), { version: '3.2.11', sequence: 8 })).rejects.toThrow(/live client entry/);
         });
 
         test('a withdrawal hides the installer and keeps the client', async () => {
             await publishLauncher(5, '3.2.11', crypto.randomBytes(1024));
             world.writes.length = 0;
-            await cli.prepareWithdraw(config('staging'), { sequence: 6 });
+            await cli.prepareWithdraw(config('staging'), {});
             await cli.stage(config('staging'), { withdrawal: true, sequence: 6 });
             expect(world.writes).toEqual([candidateKey('staging', 6)]);
             await cli.promote(config('staging'), { withdrawal: true, sequence: 6, 'confirm-promote': true });
@@ -784,38 +885,38 @@ describe('launcher publication CLI', () => {
             command, '--version', VERSION, '--sequence', '5', '--config', channels.staging.configPath,
             '--staging-config', channels.staging.configPath, ...extra
         ];
+        const putAttempts = () => memory.log.filter((entry) => entry.op.startsWith('put'));
 
         test('stage reports what it would upload and writes nothing', async () => {
-            const put = cli.deps.r2Put;
             await cli.main(argv('stage', '--dry-run'));
             expect(world.writes).toEqual([]);
             expect(output.join('')).toContain(`would upload installer: ${KEYS.installer}`);
             expect(output.join('')).toContain('Dry run: nothing was written to R2.');
-            expect(cli.deps.r2Put).toBe(put);
             expect(fs.existsSync(path.join(cli.deps.workRoot, 'staging.publish.lock'))).toBe(false);
         });
 
-        test('a write attempted during a dry run is refused', async () => {
-            const put = cli.deps.r2Put;
-            cli.deps.r2Put = jest.fn();
-            const stageSpy = jest.spyOn(require('../libs/launcher-release-publication'), 'requireNewerLauncherVersion')
-                .mockImplementation(() => {
-                    // simulate a bug: code that tries to write while the dry run guard is active
-                    expect(() => cli.deps.r2Put({ bucket: 'b' }, 'releases/staging/manifest.json')).toThrow(/dry run attempted to write/);
-                });
-            await cli.main(argv('stage', '--dry-run'));
-            expect(stageSpy).toHaveBeenCalled();
-            stageSpy.mockRestore();
-            cli.deps.r2Put = put;
+        test('every store a dry run opens is read-only, so a write is impossible rather than merely avoided', async () => {
+            await cli.stage(config('staging'), releaseOptions('staging'));
+            cli.deps.openStore.mockClear();
+            await cli.main(argv('stage', '--dry-run', '--resume'));
+            await cli.main(argv('promote', '--dry-run'));
+            expect(cli.deps.openStore).toHaveBeenCalled();
+            for (const [, options] of cli.deps.openStore.mock.calls) expect(options).toEqual({ writable: false });
+            const store = cli.deps.openStore.mock.results[0].value;
+            await expect(store.putIfMatch('releases/staging/manifest.json', Buffer.from('x'), 'application/json', '"e"')).rejects.toThrow(/read-only/);
+            await expect(store.putIfAbsent('k', Buffer.from('x'), 'application/json')).rejects.toThrow(/read-only/);
         });
 
         test('promote passes every check and writes nothing', async () => {
             await cli.stage(config('staging'), releaseOptions('staging'));
             world.writes.length = 0;
+            memory.log.length = 0;
             await cli.main(argv('promote', '--dry-run'));
             expect(world.writes).toEqual([]);
+            expect(putAttempts()).toEqual([]);
             expect(liveOf('staging').sequence).toBe(4);
             expect(output.join('')).toContain('passed every check');
+            expect(output.join('')).toContain('written only if the live ETag is still');
         });
 
         test('a dry run still fails on a problem a real run would hit', async () => {
@@ -824,59 +925,49 @@ describe('launcher publication CLI', () => {
             await expect(cli.main(argv('promote', '--dry-run'))).rejects.toThrow(/staged installer does not match/);
         });
 
-        test('never spawns a wrangler put, even through the real wrangler wrapper', async () => {
-            Object.assign(cli.deps, { r2Get: io.r2Get, r2Put: io.r2Put });
-            const calls = [];
-            jest.spyOn(childProcess, 'spawnSync').mockImplementation((command, args) => {
-                calls.push(args.slice(1));
-                const verb = args[3];
-                const objectPath = args[4];
-                const file = args[args.indexOf('--file') + 1];
-                if (verb === 'get' && world.r2.has(objectPath)) {
-                    fs.writeFileSync(file, world.r2.get(objectPath));
-                    return { status: 0, stdout: '', stderr: '' };
-                }
-                return { status: 1, stdout: '', stderr: 'The specified key does not exist. (10007)' };
-            });
+        test('through the real S3 transport, no PUT request leaves the process', async () => {
+            const fetchMock = createMemoryFetch(memory);
+            cli.deps.openStore.mockImplementation((cfg, options) => createR2Store({
+                bucket: cfg.bucket, accountId: 'acct', accessKeyId: 'AK', secretAccessKey: 'SK', fetch: fetchMock, ...options
+            }));
             await cli.main(argv('stage', '--dry-run'));
-            expect(calls.length).toBeGreaterThan(0);
-            expect(calls.every((args) => args[2] === 'get')).toBe(true);
+            expect(fetchMock.requests.length).toBeGreaterThan(0);
+            expect(fetchMock.requests.map((request) => request.method).filter((method) => !['GET', 'HEAD'].includes(method))).toEqual([]);
+            await cli.stage(config('staging'), releaseOptions('staging'));
+            fetchMock.requests.length = 0;
+            await cli.main(argv('promote', '--dry-run'));
+            expect(fetchMock.requests.length).toBeGreaterThan(0);
+            expect(fetchMock.requests.every((request) => ['GET', 'HEAD'].includes(request.method))).toBe(true);
         });
     });
 
-    describe('real wrangler commands', () => {
-        test('stage and promote run exactly the documented wrangler puts, remotely, in order', async () => {
+    describe('through the real S3 transport', () => {
+        test('stage and promote send the documented signed requests, in order, each write conditional', async () => {
             await cli.prepare(config('staging'), prepareOptions('staging'));
-            Object.assign(cli.deps, { r2Get: io.r2Get, r2Put: io.r2Put });
-            const puts = [];
-            jest.spyOn(childProcess, 'spawnSync').mockImplementation((command, args) => {
-                const verb = args[3];
-                const objectPath = args[4];
-                const file = args[args.indexOf('--file') + 1];
-                if (verb === 'put') {
-                    puts.push(args.slice(1));
-                    world.r2.set(objectPath, fs.readFileSync(file));
-                    return { status: 0, stdout: '', stderr: '' };
-                }
-                if (world.r2.has(objectPath)) {
-                    fs.writeFileSync(file, world.r2.get(objectPath));
-                    return { status: 0, stdout: '', stderr: '' };
-                }
-                return { status: 1, stdout: '', stderr: 'The specified key does not exist. (10007)' };
-            });
+            const base = memory.etag('bucket-staging', 'releases/staging/manifest.json');
+            const fetchMock = createMemoryFetch(memory);
+            cli.deps.openStore.mockImplementation((cfg, options) => createR2Store({
+                bucket: cfg.bucket, accountId: 'acct', accessKeyId: 'AK', secretAccessKey: 'SK', fetch: fetchMock, ...options
+            }));
             await cli.stage(config('staging'), releaseOptions('staging'));
             await cli.promote(config('staging'), promoteOptions('staging'));
-            expect(puts.map((args) => args[3])).toEqual([
-                `bucket-staging/${KEYS.installer}`,
-                `bucket-staging/${KEYS.updater}`,
-                'bucket-staging/releases/staging/candidates/sequence-5-manifest.json',
-                'bucket-staging/releases/staging/manifest.json'
+            const puts = fetchMock.requests.filter((request) => request.method === 'PUT');
+            expect(puts.map((request) => request.key)).toEqual([
+                KEYS.installer,
+                KEYS.updater,
+                'releases/staging/candidates/sequence-5-manifest.json',
+                'releases/staging/manifest.json'
             ]);
-            for (const args of puts) {
-                expect(args.slice(0, 3)).toEqual(['r2', 'object', 'put']);
-                expect(args).toContain('--remote');
-                expect(args).toContain('--force');
+            for (const request of puts.slice(0, 3)) {
+                expect(request.headers['if-none-match']).toBe('*');
+                expect(request.headers['if-match']).toBeUndefined();
             }
+            expect(puts[3].headers['if-match']).toBe(base);
+            expect(puts[3].headers['if-none-match']).toBeUndefined();
+            for (const request of fetchMock.requests) {
+                expect(request.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AK\/\d{8}\/auto\/s3\/aws4_request/);
+            }
+            expect(liveOf('staging').sequence).toBe(5);
         });
     });
 
@@ -925,7 +1016,52 @@ describe('launcher publication CLI', () => {
             await cli.stage(config('staging'), releaseOptions('staging'));
             // another publisher got sequence 5 live first (for example a client release)
             seedManifest('staging', { sequence: 5 });
-            await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/must be greater than live sequence 5/);
+            await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/changed after this bundle was prepared/);
+        });
+
+        test('two prepares from the same live state compute the same sequence: the second cannot stage over the first', async () => {
+            // machine A and machine B prepare the same next sequence (5) with different bytes
+            const machineB = fs.mkdtempSync(path.join(os.tmpdir(), 'cut-launcher-b-'));
+            const workA = cli.deps.workRoot;
+            cli.deps.workRoot = machineB;
+            const other = path.join(directory, 'candidates', 'staging-b');
+            fs.mkdirSync(other, { recursive: true });
+            const bytes = crypto.randomBytes(2048);
+            fs.writeFileSync(path.join(other, FILE_NAME), bytes);
+            fs.writeFileSync(path.join(other, 'candidate.json'), JSON.stringify({ ...candidateFor('staging', bytes), sourceCommit: 'b'.repeat(40) }));
+            try {
+                await cli.prepare(config('staging'), prepareOptions('staging', { candidate: other, 'validated-sha256': crypto.createHash('sha256').update(bytes).digest('hex') }));
+                expect(readBundle('staging', { sequence: 5 }).payload.sequence).toBe(5);
+
+                // A stages and promotes first
+                cli.deps.workRoot = workA;
+                await cli.stage(config('staging'), releaseOptions('staging'));
+                await cli.promote(config('staging'), promoteOptions('staging'));
+                expect(liveOf('staging').sequence).toBe(5);
+
+                // B finds its base gone and its objects in the way: nothing is written
+                cli.deps.workRoot = machineB;
+                world.writes.length = 0;
+                await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/changed after this bundle was prepared/);
+                await expect(cli.promote(config('staging'), promoteOptions('staging'))).rejects.toThrow(/changed after this bundle was prepared/);
+                expect(world.writes).toEqual([]);
+            } finally {
+                cli.deps.workRoot = workA;
+                fs.rmSync(machineB, { recursive: true, force: true });
+            }
+        });
+
+        test('the candidate key is shared by both prepares, so a stage that races the other one is refused by R2', async () => {
+            // another publisher staged a different candidate for sequence 5 between this stage's check and its write
+            memory.before = (op, bucket, key) => {
+                if (op === 'putIfAbsent' && key === 'releases/staging/candidates/sequence-5-manifest.json') {
+                    memory.before = null;
+                    memory.seed(bucket, key, Buffer.from('another candidate'));
+                }
+            };
+            await expect(cli.stage(config('staging'), releaseOptions('staging'))).rejects.toThrow(/created by another publication with different bytes/);
+            expect(world.writes).toEqual([bucketKey('staging', KEYS.installer), bucketKey('staging', KEYS.updater)]);
+            expect(memory.bytes('bucket-staging', 'releases/staging/candidates/sequence-5-manifest.json').toString()).toBe('another candidate');
         });
     });
 });

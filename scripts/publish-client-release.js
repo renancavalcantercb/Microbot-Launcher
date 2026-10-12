@@ -14,16 +14,20 @@ const {
 const { verifyReleaseManifest } = require('../libs/release-manifest');
 const { requireClientReleaseKeepsLauncher } = require('../libs/launcher-release-publication');
 const io = require('../libs/release-publication-io');
+const ops = require('../libs/release-store-ops');
+const { openStore } = require('../libs/r2-store');
 
 const { acquirePublicationLock, artifactUrl, downloadResponse, launcherRoot, loadConfiguration, run } = io;
 
 function usage() {
     return [
+        'The sequence of a new release is computed from the live manifest in R2 (live + 1); it is never typed.',
+        'prepare prints it, and stage, promote and verify take it back with --sequence to find the bundle.',
         'Usage:',
-        '  node scripts/publish-client-release.js prepare --version <version> --sequence <n> [--source-jar <path>] [--skip-build] [--allow-dirty]',
-        '  node scripts/publish-client-release.js prepare-rollback --version <known-good-version> --source-sequence <n> --sequence <next-sequence>',
-        '  node scripts/publish-client-release.js stage --version <version> --sequence <n> [--resume]',
-        '  node scripts/publish-client-release.js promote --version <version> --sequence <n> --confirm-promote',
+        '  node scripts/publish-client-release.js prepare --version <version> [--source-jar <path>] [--skip-build] [--allow-dirty]',
+        '  node scripts/publish-client-release.js prepare-rollback --version <known-good-version> --source-sequence <n>',
+        '  node scripts/publish-client-release.js stage --version <version> --sequence <n> [--resume] [--dry-run]',
+        '  node scripts/publish-client-release.js promote --version <version> --sequence <n> --confirm-promote [--dry-run]',
         '  node scripts/publish-client-release.js verify --version <version> --sequence <n>',
         '',
         'All commands default to config/release-publication.staging.json.',
@@ -31,9 +35,18 @@ function usage() {
     ].join('\n');
 }
 
+const COMMAND_OPTIONS = {
+    prepare: ['version', 'source-jar', 'skip-build', 'allow-dirty', 'config'],
+    'prepare-rollback': ['version', 'source-sequence', 'config'],
+    stage: ['version', 'sequence', 'resume', 'dry-run', 'config'],
+    promote: ['version', 'sequence', 'confirm-promote', 'dry-run', 'config'],
+    verify: ['version', 'sequence', 'config']
+};
+const FLAGS = ['skip-build', 'allow-dirty', 'resume', 'confirm-promote', 'dry-run'];
+
 function parseArguments(argv) {
     const [command, ...rest] = argv;
-    if (!['prepare', 'prepare-rollback', 'stage', 'promote', 'verify'].includes(command)) {
+    if (!Object.prototype.hasOwnProperty.call(COMMAND_OPTIONS, command)) {
         throw new Error(usage());
     }
     const options = {};
@@ -41,7 +54,11 @@ function parseArguments(argv) {
         const token = rest[index];
         if (!token.startsWith('--')) throw new Error(`unexpected argument: ${token}`);
         const name = token.slice(2);
-        if (['skip-build', 'allow-dirty', 'resume', 'confirm-promote'].includes(name)) {
+        if (name === 'sequence' && !COMMAND_OPTIONS[command].includes(name)) {
+            throw new Error(`${command} computes the sequence from the live manifest; --sequence is not accepted`);
+        }
+        if (!COMMAND_OPTIONS[command].includes(name)) throw new Error(`unknown option for ${command}: ${token}`);
+        if (FLAGS.includes(name)) {
             options[name] = true;
             continue;
         }
@@ -50,16 +67,18 @@ function parseArguments(argv) {
         options[name] = value;
         index += 1;
     }
-    if (!options.version || !options.sequence) throw new Error(usage());
-    options.sequence = Number(options.sequence);
-    validateReleaseIdentity(options.version, options.sequence);
+    if (!options.version) throw new Error(usage());
+    if (['stage', 'promote', 'verify'].includes(command)) {
+        if (!options.sequence) throw new Error(usage());
+        options.sequence = Number(options.sequence);
+        validateReleaseIdentity(options.version, options.sequence);
+    } else {
+        validateReleaseIdentity(options.version, 1);
+    }
     if (command === 'prepare-rollback') {
         options['source-sequence'] = Number(options['source-sequence']);
         if (!Number.isSafeInteger(options['source-sequence']) || options['source-sequence'] <= 0) {
             throw new Error('prepare-rollback requires a positive --source-sequence');
-        }
-        if (options.sequence <= options['source-sequence']) {
-            throw new Error('rollback sequence must be greater than source sequence');
         }
     }
     return { command, options };
@@ -88,13 +107,14 @@ function runGradleBuild(config) {
     run(executable, [':client:assemble'], config.clientRepository, { env: environment });
 }
 
-// Seam for tests: the commands reach the network, R2 and git only through these.
+// Seam for tests: the commands reach the network, R2 and git only through these. `openStore` builds
+// the S3 transport; a store opened with `writable: false` cannot write, and prepare, verify and
+// every dry run open it that way.
 const deps = {
     workRoot: path.join(launcherRoot, '.release-work'),
     liveManifest: io.liveManifest,
     fetchResponse: io.fetchResponse,
-    r2Get: io.r2Get,
-    r2Put: io.r2Put,
+    openStore,
     runGradleBuild,
     gitCommit,
     gitDirty
@@ -107,15 +127,13 @@ function releaseBundle(config, options) {
         options.version,
         options.sequence
     );
-    return {
-        directory,
-        ...readAndVerifyBundle({
-            outputDirectory: directory,
-            channel: config.channel,
-            keyId: config.keyId,
-            publicKey: config.publicKey
-        })
-    };
+    const bundle = readAndVerifyBundle({
+        outputDirectory: directory,
+        channel: config.channel,
+        keyId: config.keyId,
+        publicKey: config.publicKey
+    });
+    return { directory, base: ops.requireBase(bundle.metadata), ...bundle };
 }
 
 function gitCommit(repository) {
@@ -130,37 +148,54 @@ function gitDirty(repository) {
     ).length > 0;
 }
 
+function recordBaseOrDiscard(directory, live) {
+    try {
+        ops.recordBase(directory, live);
+    } catch (error) {
+        fs.rmSync(directory, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+const baseLine = (live, sequence) =>
+    `Sequence: ${sequence} (${live ? `live sequence ${live.payload.sequence} + 1` : 'no live manifest yet'})\n` +
+    `Based on live ETag: ${live ? live.etag : 'none (the manifest does not exist yet)'}\n`;
+
 async function prepare(config, options) {
     const sourceDirty = deps.gitDirty(config.clientRepository);
     if (sourceDirty && !options['allow-dirty']) {
         throw new Error('client repository has uncommitted changes; commit them or use --allow-dirty for a local-only bundle');
     }
-    // A client release must not unpublish the launcher: the live entry is carried over unchanged.
-    const live = await deps.liveManifest(config, { allowMissing: true });
     if (!options['skip-build']) deps.runGradleBuild(config);
+    // The live manifest is read after the build, which can take minutes, so the base is current. A
+    // client release must not unpublish the launcher: the live entry is carried over unchanged.
+    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
+    const sequence = ops.nextSequence(live);
     const sourceJar = path.resolve(launcherRoot, options['source-jar'] || config.sourceJar);
     const outputDirectory = bundleDirectory(
         deps.workRoot,
         config.channel,
         options.version,
-        options.sequence
+        sequence
     );
     const result = prepareClientRelease({
         sourceJar,
         outputDirectory,
         channel: config.channel,
         version: options.version,
-        sequence: options.sequence,
+        sequence,
         minimumLauncherVersion: config.minimumLauncherVersion,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey,
         sourceCommit: deps.gitCommit(config.clientRepository),
         sourceDirty,
-        launcher: live?.launcher ?? null
+        launcher: live?.payload.launcher ?? null
     });
+    recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
-        `Prepared ${options.version} sequence ${options.sequence}\n` +
+        `Prepared ${options.version}\n` +
+        baseLine(live, sequence) +
         `Size: ${result.payload.client.size} bytes\n` +
         `SHA-256: ${result.payload.client.sha256}\n` +
         `Bundle: ${outputDirectory}\n`
@@ -168,6 +203,8 @@ async function prepare(config, options) {
 }
 
 async function prepareRollback(config, options) {
+    const live = await ops.readLiveManifest(deps.openStore(config, { writable: false }), config);
+    const sequence = ops.nextSequence(live);
     const sourceDirectory = bundleDirectory(
         deps.workRoot,
         config.channel,
@@ -178,21 +215,22 @@ async function prepareRollback(config, options) {
         deps.workRoot,
         config.channel,
         options.version,
-        options.sequence
+        sequence
     );
-    const live = await deps.liveManifest(config, { allowMissing: true });
     const result = prepareClientRollback({
         sourceDirectory,
         outputDirectory,
         channel: config.channel,
-        sequence: options.sequence,
+        sequence,
         keyId: config.keyId,
         privateKeyPem: fs.readFileSync(config.privateKeyPath, 'utf8'),
         publicKey: config.publicKey,
-        launcher: live?.launcher ?? null
+        launcher: live?.payload.launcher ?? null
     });
+    recordBaseOrDiscard(outputDirectory, live);
     process.stdout.write(
-        `Prepared rollback to ${options.version} at sequence ${options.sequence}\n` +
+        `Prepared rollback to ${options.version}\n` +
+        baseLine(live, sequence) +
         `Reused sequence: ${result.source.payload.sequence}\n` +
         `SHA-256: ${result.payload.client.sha256}\n` +
         `Bundle: ${outputDirectory}\n`
@@ -204,67 +242,68 @@ async function stage(config, options) {
     if (bundle.metadata.sourceDirty) {
         throw new Error('refusing to stage a release prepared from an uncommitted client worktree');
     }
-    const current = await deps.liveManifest(config, { allowMissing: true });
-    requireNewerSequence(bundle.payload, current);
-    requireClientReleaseKeepsLauncher(bundle.payload, current);
-    const publicUrl = artifactUrl(config, bundle.payload.client.artifactPath);
-    const head = await deps.fetchResponse(publicUrl, { method: 'HEAD', cache: 'no-store' });
-    if (![200, 404].includes(head.status)) {
-        throw new Error(`artifact preflight returned unexpected HTTP ${head.status}`);
-    }
-    if (bundle.metadata.reusesArtifact && head.status === 404) {
-        throw new Error('known-good rollback artifact is no longer available');
-    }
-    if (head.status !== 404 && !bundle.metadata.reusesArtifact && !options.resume) {
-        throw new Error(`immutable artifact already exists (HTTP ${head.status}); use --resume only to verify it`);
-    }
+    const dryRun = Boolean(options['dry-run']);
+    const store = deps.openStore(config, { writable: !dryRun });
+    const live = await ops.readLiveManifest(store, config);
+    ops.requireLiveMatchesBase(live, bundle.base);
+    requireNewerSequence(bundle.payload, live && live.payload);
+    requireClientReleaseKeepsLauncher(bundle.payload, live && live.payload);
 
+    const report = [];
+    const objects = [
+        {
+            name: 'artifact',
+            key: bundle.metadata.artifactObjectKey,
+            file: bundle.artifactFile,
+            contentType: 'application/java-archive',
+            reuse: Boolean(bundle.metadata.reusesArtifact)
+        },
+        {
+            name: 'candidate',
+            key: bundle.metadata.candidateObjectKey,
+            file: path.join(bundle.directory, 'manifest.json'),
+            contentType: 'application/json',
+            reuse: false
+        }
+    ];
+    for (const spec of objects) {
+        const result = await ops.putImmutable(store, {
+            key: spec.key,
+            file: spec.file,
+            contentType: spec.contentType,
+            name: spec.name,
+            resume: Boolean(options.resume),
+            reuse: spec.reuse,
+            dryRun
+        });
+        const verb = { verified: 'verified existing', uploaded: 'uploaded and verified', 'would-upload': 'would upload' }[result.action];
+        report.push(`${verb} ${spec.name}: ${spec.key} (${result.size} bytes)`);
+        if (spec.name === 'artifact' && !dryRun) await verifyPublicArtifact(config, bundle);
+    }
+    process.stdout.write(`${report.join('\n')}\n`);
+    process.stdout.write(dryRun
+        ? 'Dry run: nothing was written to R2.\n'
+        : `Staged immutable ${options.version} sequence ${options.sequence}; the live channel was not changed.\n`);
+}
+
+// What the public edge serves for the artifact must be the bundle's bytes.
+async function verifyPublicArtifact(config, bundle) {
+    const publicUrl = artifactUrl(config, bundle.payload.client.artifactPath);
+    const response = await deps.fetchResponse(publicUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`artifact read-back returned HTTP ${response.status}`);
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-release-'));
     try {
-        const artifactReadback = path.join(temporaryDirectory, bundle.metadata.artifactFile);
-        if (head.status === 404) {
-            deps.r2Put(config, bundle.metadata.artifactObjectKey, bundle.artifactFile, 'application/java-archive');
-        }
-        const artifactResponse = await deps.fetchResponse(publicUrl, { cache: 'no-store' });
-        if (!artifactResponse.ok) throw new Error(`artifact read-back returned HTTP ${artifactResponse.status}`);
-        await downloadResponse(artifactResponse, artifactReadback);
+        const destination = path.join(temporaryDirectory, bundle.metadata.artifactFile);
+        await downloadResponse(response, destination);
         if (
-            fs.statSync(artifactReadback).size !== bundle.payload.client.size ||
-            sha256File(artifactReadback) !== bundle.payload.client.sha256
+            fs.statSync(destination).size !== bundle.payload.client.size ||
+            sha256File(destination) !== bundle.payload.client.sha256
         ) {
-            throw new Error('R2 artifact read-back failed size or SHA-256 verification');
-        }
-
-        const candidateReadback = path.join(temporaryDirectory, 'candidate.json');
-        const candidateExists = deps.r2Get(
-            config,
-            bundle.metadata.candidateObjectKey,
-            candidateReadback,
-            { allowMissing: true }
-        );
-        if (candidateExists && !options.resume) {
-            throw new Error('immutable candidate manifest already exists; use --resume only to verify it');
-        }
-        if (!candidateExists) {
-            deps.r2Put(config, bundle.metadata.candidateObjectKey, path.join(bundle.directory, 'manifest.json'), 'application/json');
-            deps.r2Get(config, bundle.metadata.candidateObjectKey, candidateReadback);
-        }
-        const candidateEnvelope = JSON.parse(fs.readFileSync(candidateReadback, 'utf8'));
-        const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
-            expectedChannel: config.channel,
-            trustedKeys: { [config.keyId]: config.publicKey }
-        });
-        if (
-            candidatePayload.sequence !== bundle.payload.sequence ||
-            candidatePayload.client.sha256 !== bundle.payload.client.sha256 ||
-            JSON.stringify(candidateEnvelope) !== JSON.stringify(bundle.envelope)
-        ) {
-            throw new Error('R2 candidate does not match the local release bundle');
+            throw new Error('public artifact read-back failed size or SHA-256 verification');
         }
     } finally {
         fs.rmSync(temporaryDirectory, { recursive: true, force: true });
     }
-    process.stdout.write(`Staged immutable ${options.version} sequence ${options.sequence}; the live channel was not changed.\n`);
 }
 
 async function verifyPublicRelease(config, bundle) {
@@ -295,46 +334,63 @@ async function verifyPublicRelease(config, bundle) {
 }
 
 async function promote(config, options) {
-    if (!options['confirm-promote']) {
+    const dryRun = Boolean(options['dry-run']);
+    if (!dryRun && !options['confirm-promote']) {
         throw new Error('promotion requires --confirm-promote');
     }
     const bundle = releaseBundle(config, options);
-    const current = await deps.liveManifest(config, { allowMissing: true });
-    requireNewerSequence(bundle.payload, current);
-    requireClientReleaseKeepsLauncher(bundle.payload, current);
-    const artifactHead = await deps.fetchResponse(
-        artifactUrl(config, bundle.payload.client.artifactPath),
-        { method: 'HEAD', cache: 'no-store' }
-    );
-    if (
-        !artifactHead.ok ||
-        Number(artifactHead.headers.get('content-length')) !== bundle.payload.client.size
-    ) {
+    const store = deps.openStore(config, { writable: !dryRun });
+    const live = await ops.readLiveManifest(store, config);
+    ops.requireLiveMatchesBase(live, bundle.base);
+    requireNewerSequence(bundle.payload, live && live.payload);
+    requireClientReleaseKeepsLauncher(bundle.payload, live && live.payload);
+    const artifact = await store.head(bundle.metadata.artifactObjectKey);
+    if (!artifact.found || artifact.size !== bundle.payload.client.size) {
         throw new Error('staged artifact is unavailable or has the wrong size');
     }
-    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'microbot-cut-promote-'));
-    try {
-        const candidate = path.join(temporaryDirectory, 'candidate.json');
-        if (!deps.r2Get(config, bundle.metadata.candidateObjectKey, candidate, { allowMissing: true })) {
-            throw new Error('candidate manifest is not staged');
-        }
-        const candidateEnvelope = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-        const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
-            expectedChannel: config.channel,
-            trustedKeys: { [config.keyId]: config.publicKey }
-        });
-        if (
-            candidatePayload.sequence !== bundle.payload.sequence ||
-            candidatePayload.client.sha256 !== bundle.payload.client.sha256 ||
-            JSON.stringify(candidateEnvelope) !== JSON.stringify(bundle.envelope)
-        ) {
-            throw new Error('staged candidate does not match the local release bundle');
-        }
-        deps.r2Put(config, bundle.metadata.manifestObjectKey, candidate, 'application/json');
-    } finally {
-        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    const staged = await store.get(bundle.metadata.candidateObjectKey);
+    if (!staged.found) throw new Error('candidate manifest is not staged');
+    const candidateEnvelope = JSON.parse(staged.bytes.toString('utf8'));
+    const candidatePayload = verifyReleaseManifest(candidateEnvelope, {
+        expectedChannel: config.channel,
+        trustedKeys: { [config.keyId]: config.publicKey }
+    });
+    if (
+        candidatePayload.sequence !== bundle.payload.sequence ||
+        candidatePayload.client.sha256 !== bundle.payload.client.sha256 ||
+        JSON.stringify(candidateEnvelope) !== JSON.stringify(bundle.envelope)
+    ) {
+        throw new Error('staged candidate does not match the local release bundle');
     }
-    await verifyPublicRelease(config, bundle);
+    if (dryRun) {
+        process.stdout.write(
+            `Dry run: ${options.version} sequence ${options.sequence} passed every check; ` +
+            `it would replace ${live ? `live sequence ${live.payload.sequence}` : 'a missing manifest'} on ${config.channel}, ` +
+            `written only if the live ETag is still ${bundle.base.etag}. Nothing was written.\n`
+        );
+        return;
+    }
+
+    // The only write that changes what users see. It carries If-Match with the ETag of the manifest
+    // this bundle was prepared against, so R2 refuses it if anything else (a launcher release, another
+    // client release) was published since. A conflict is not retried and nothing is overwritten.
+    try {
+        await ops.promoteManifest(store, config, { bytes: staged.bytes, base: bundle.base });
+    } catch (error) {
+        if (error instanceof ops.PublicationConflictError || error instanceof ops.WriteNotAppliedError) throw error;
+        throw new Error(
+            `${error.message}. The manifest write was attempted and the release may already be live. ` +
+            'Run verify. To revert, prepare a rollback (a higher sequence); never lower the sequence.'
+        );
+    }
+    try {
+        await verifyPublicRelease(config, bundle);
+    } catch (error) {
+        throw new Error(
+            `${error.message}. The manifest was written and the release is live in R2. ` +
+            'Run verify (the public edge caches the manifest for up to a minute).'
+        );
+    }
     process.stdout.write(`Promoted ${options.version} sequence ${options.sequence} to ${config.channel}.\n`);
 }
 
@@ -350,9 +406,14 @@ async function main(argv = process.argv.slice(2)) {
     if (command === 'prepare') return prepare(config, options);
     if (command === 'prepare-rollback') return prepareRollback(config, options);
     if (command === 'verify') return verify(config, options);
+    const run = command === 'stage' ? stage : promote;
+    // A dry run writes nothing and so needs no lock; its store is opened read-only.
+    if (options['dry-run']) return run(config, options);
+    // The lock keeps two publications of this machine apart. Across machines the ETag condition on
+    // every write is what protects the channel.
     const release = acquirePublicationLock(deps.workRoot, config.channel, `client ${command} ${options.version}`);
     try {
-        return await (command === 'stage' ? stage(config, options) : promote(config, options));
+        return await run(config, options);
     } finally {
         release();
     }

@@ -158,20 +158,17 @@ describe('client release publication', () => {
             }
         });
         expect(parseArguments([
-            'prepare-rollback', '--version', 'cut-2.6.30-r2',
-            '--source-sequence', '2', '--sequence', '3'
+            'prepare-rollback', '--version', 'cut-2.6.30-r2', '--source-sequence', '2'
         ])).toEqual({
             command: 'prepare-rollback',
             options: {
                 version: 'cut-2.6.30-r2',
-                'source-sequence': 2,
-                sequence: 3
+                'source-sequence': 2
             }
         });
         expect(() => parseArguments([
-            'prepare-rollback', '--version', 'cut-2.6.30-r2',
-            '--source-sequence', '2', '--sequence', '2'
-        ])).toThrow('rollback sequence must be greater than source sequence');
+            'prepare-rollback', '--version', 'cut-2.6.30-r2', '--source-sequence', '2', '--sequence', '3'
+        ])).toThrow('computes the sequence from the live manifest');
         expect(() => parseArguments(['stage', '--version', '../bad', '--sequence', '3']))
             .toThrow('client version is invalid');
     });
