@@ -88,15 +88,6 @@ describe('beforePack hook', () => {
 
 describe('installer identity', () => {
     const identityOf = (name) => profileLib.loadProfileSource({ fs, path, root, name }).identity;
-    const effectiveText = (identity) => [
-        `appId: ${identity.appId}`,
-        `productName: ${identity.productName}`,
-        'nsis:',
-        '  oneClick: false',
-        `  shortcutName: ${identity.shortcutName}`,
-        ''
-    ].join('\n');
-
     test.each(['staging', 'production'])('%s builder arguments carry its identity', (name) => {
         const identity = identityOf(name);
         expect(build.identityBuilderArguments(identity)).toEqual([
@@ -107,22 +98,22 @@ describe('installer identity', () => {
         ]);
     });
 
-    test.each(['staging', 'production'])('accepts the %s effective configuration', (name) => {
+    test.each(['staging', 'production'])('accepts the %s executable', (name) => {
         const identity = identityOf(name);
         expect(build.verifyInstallerIdentity({
-            effectiveConfigText: effectiveText(identity), identity, executableName: `${identity.productName}.exe`
-        })).toEqual({ appId: identity.appId, productName: identity.productName, shortcutName: identity.shortcutName });
+            identity, executableName: `${identity.productName}.exe`, executableProductName: identity.productName
+        })).toEqual({ executableName: `${identity.productName}.exe`, productName: identity.productName });
     });
 
-    test('rejects an installer built with the other environment identity', () => {
+    test('rejects an executable built with the other environment identity', () => {
         const staging = identityOf('staging');
         const production = identityOf('production');
         expect(() => build.verifyInstallerIdentity({
-            effectiveConfigText: effectiveText(production), identity: staging, executableName: `${staging.productName}.exe`
-        })).toThrow('appId');
-        expect(() => build.verifyInstallerIdentity({
-            effectiveConfigText: effectiveText(staging), identity: staging, executableName: `${production.productName}.exe`
+            identity: staging, executableName: `${production.productName}.exe`, executableProductName: staging.productName
         })).toThrow('executable');
+        expect(() => build.verifyInstallerIdentity({
+            identity: staging, executableName: `${staging.productName}.exe`, executableProductName: production.productName
+        })).toThrow('product name');
     });
 
     test('the Windows package does not list the macOS-only instructions', () => {

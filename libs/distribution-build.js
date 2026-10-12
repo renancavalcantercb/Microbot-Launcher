@@ -96,36 +96,18 @@ function verifyPackedApp({ asarApi, asarPath, resourcesDirectory, expectedProfil
     return { packageCount: packed.size, embeddedProfileSha256: sha256(Buffer.from(embedded, 'utf8')) };
 }
 
-// electron-builder writes the configuration it actually used; the installer identity is checked
-// there because it is not visible inside app.asar.
-function readEffectiveBuilderConfig(text) {
-    const value = (key) => {
-        const match = new RegExp(`^${key}: (.+)$`, 'm').exec(text);
-        return match ? match[1].trim().replace(/^['"]|['"]$/g, '') : null;
-    };
-    const shortcut = /^\s{2}shortcutName: (.+)$/m.exec(text);
-    return {
-        appId: value('appId'),
-        productName: value('productName'),
-        shortcutName: shortcut ? shortcut[1].trim().replace(/^['"]|['"]$/g, '') : null
-    };
-}
-
-function verifyInstallerIdentity({ effectiveConfigText, identity, executableName }) {
-    const effective = readEffectiveBuilderConfig(effectiveConfigText);
-    for (const [key, expected] of [
-        ['appId', identity.appId],
-        ['productName', identity.productName],
-        ['shortcutName', identity.shortcutName]
-    ]) {
-        if (effective[key] !== expected) {
-            throw new Error(`installer ${key} is ${JSON.stringify(effective[key])}, expected ${JSON.stringify(expected)}`);
-        }
-    }
+// electron-builder does not keep its effective configuration, so the identity is checked on the
+// packed executable: its file name comes from productName and its version resource records the
+// product name. The app id and shortcut name are pinned by the builder arguments below, which
+// are unit tested, and are re-checked on the clean machine (L3).
+function verifyInstallerIdentity({ identity, executableName, executableProductName }) {
     if (executableName !== `${identity.productName}.exe`) {
         throw new Error(`installed executable is ${executableName}, expected ${identity.productName}.exe`);
     }
-    return effective;
+    if (executableProductName !== identity.productName) {
+        throw new Error(`executable product name is ${JSON.stringify(executableProductName)}, expected ${JSON.stringify(identity.productName)}`);
+    }
+    return { executableName, productName: executableProductName };
 }
 
 // electron-builder overrides that give each installer its own Windows identity.
@@ -177,7 +159,6 @@ module.exports = {
     effectiveChannelConfiguration,
     embedProfile,
     identityBuilderArguments,
-    readEffectiveBuilderConfig,
     verifyInstallerIdentity,
     packagesInAsar,
     parseBuildArguments,

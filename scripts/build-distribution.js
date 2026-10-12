@@ -82,10 +82,16 @@ function main() {
 
     const unpacked = path.join(buildDirectory, 'win-unpacked');
     const executables = fs.readdirSync(unpacked).filter((name) => name.toLowerCase().endsWith('.exe'));
+    const executable = executables.length === 1 ? executables[0] : executables.join(',');
+    const versionInfo = spawnSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        '(Get-Item -LiteralPath $args[0]).VersionInfo.ProductName',
+        path.join(unpacked, executable)
+    ], { encoding: 'utf8' });
     verifyInstallerIdentity({
-        effectiveConfigText: fs.readFileSync(path.join(buildDirectory, 'builder-effective-config.yaml'), 'utf8'),
         identity: profile.identity,
-        executableName: executables.length === 1 ? executables[0] : executables.join(',')
+        executableName: executable,
+        executableProductName: (versionInfo.stdout || '').trim()
     });
 
     const fileName = installerFileName(version);
