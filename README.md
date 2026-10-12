@@ -23,6 +23,20 @@ Run the private Cut Walker development build with:
 npm.cmd run dev:walker
 ```
 
+To load the locally built Remote Guardian instead of the signed plugin catalog:
+
+```powershell
+npm.cmd run dev:guardian
+```
+
+This command requires a selected client release that contains the
+`BreakHandlerV2Status` contract. Staging `cut-2.6.31-p11` predates that contract;
+publish and select the next staging client candidate before running this command.
+
+Remote Guardian remains a development-only premium candidate until its local
+pairing, command authorization, Break Handler status, and shutdown behavior
+have passed the acceptance checklist.
+
 This installs the locally built `cut-walker-0.1.6.jar` into the isolated
 development plugin directory and disables the remote plugin catalog for that
 launcher process. It still uses product authentication and the signed staging

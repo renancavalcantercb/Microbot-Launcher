@@ -2,7 +2,8 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot '..\config\plugin-repository.staging.json'),
     [string]$ReleaseConfigPath = (Join-Path $PSScriptRoot '..\config\release-updates.staging.json'),
     [switch]$PluginDevelopment,
-    [string]$PluginJar = (Join-Path $PSScriptRoot '..\..\microbot-cut-plugins\plugins\cut-walker\build\libs\cut-walker-0.1.6.jar')
+    [string]$PluginJar = (Join-Path $PSScriptRoot '..\..\microbot-cut-plugins\plugins\cut-walker\build\libs\cut-walker-0.1.6.jar'),
+    [string]$PluginDevelopmentJarName = 'CutWalkerPlugin.jar'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,7 +29,12 @@ $env:MICROBOT_CUT_API_BASE_URL = $repository.productApiBaseUrl
 if ($PluginDevelopment) {
     $resolvedPluginJar = (Resolve-Path -LiteralPath $PluginJar).Path
     $developmentPluginDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.runelite\microbot-cut-dev-plugins'
-    $developmentPluginJar = Join-Path $developmentPluginDirectory 'CutWalkerPlugin.jar'
+    if ([string]::IsNullOrWhiteSpace($PluginDevelopmentJarName) -or
+        [IO.Path]::GetFileName($PluginDevelopmentJarName) -ne $PluginDevelopmentJarName -or
+        [IO.Path]::GetExtension($PluginDevelopmentJarName) -ne '.jar') {
+        throw 'PluginDevelopmentJarName must be a plain .jar file name.'
+    }
+    $developmentPluginJar = Join-Path $developmentPluginDirectory $PluginDevelopmentJarName
 
     New-Item -ItemType Directory -Force -Path $developmentPluginDirectory | Out-Null
     Copy-Item -Force -LiteralPath $resolvedPluginJar -Destination $developmentPluginJar
@@ -43,7 +49,7 @@ if ($PluginDevelopment) {
     )) {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
-    Write-Host "Installed local Cut Walker development artifact: $developmentPluginJar"
+    Write-Host "Installed local plugin development artifact: $developmentPluginJar"
 } else {
     Remove-Item Env:MICROBOT_CUT_PLUGIN_DEV -ErrorAction SilentlyContinue
     $env:MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true'
