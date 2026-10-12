@@ -46,9 +46,14 @@ function runTests(cwd) {
 
 function removeWorktree() {
     if (!fs.existsSync(worktree)) return;
-    // Plain removal fails on long node_modules paths; the extended-length prefix does not.
-    spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `rd /s /q "\\\\?\\${worktree}"`], { stdio: 'ignore' });
+    // Plain removal fails on long node_modules paths; the extended-length prefix does not. The
+    // command line is passed verbatim because Node would otherwise re-escape its quotes.
+    spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `rd /s /q "\\\\?\\${worktree}"`], {
+        stdio: 'ignore',
+        windowsVerbatimArguments: true
+    });
     spawnSync('git', ['worktree', 'prune'], { cwd: root, stdio: 'ignore' });
+    if (fs.existsSync(worktree)) throw new Error(`could not remove the temporary worktree: ${worktree}`);
 }
 
 function main() {
