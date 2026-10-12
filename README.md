@@ -30,8 +30,8 @@ npm.cmd run dev:guardian
 ```
 
 This command requires a selected client release that contains the
-`BreakHandlerV2Status` contract. Staging `cut-2.6.31-p11` predates that contract;
-publish and select the next staging client candidate before running this command.
+`BreakHandlerV2Status` contract. Staging `cut-2.6.31-p12` is the first signed
+candidate that contains it.
 
 Remote Guardian remains a development-only premium candidate until its local
 pairing, command authorization, Break Handler status, and shutdown behavior
@@ -55,10 +55,10 @@ catalog signature, public artifact hash, Worker catalog, and premium access
 control validation. Premium installation, verified-cache loading, entitlement
 revocation, and automatic runtime shutdown also passed in production.
 
-The current staging client is `cut-2.6.31-p11`, signed release sequence 14. Its
+The current staging client is `cut-2.6.31-p12`, signed release sequence 15. Its
 manifest and public artifact have passed publication verification. Startup
-acknowledgement and last-known-good persistence remain part of the private
-walker acceptance run. Release commands are defined by
+acknowledgement and Remote Guardian integration remain part of the private
+acceptance run. Release commands are defined by
 `npm.cmd run release:client` and must follow prepare, immutable stage, explicit
 promote, and verify.
 
