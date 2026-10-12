@@ -7,7 +7,9 @@ const crypto = require('crypto');
 module.exports = function setupMockAuth(deps) {
     const { ipcMain, log } = deps;
 
-    const isMockEnabled = process.env.MOCK_AUTH === '1' || process.env.MOCK_AUTH === 'true';
+    // A distributed launcher never enables the mock, whatever the environment says.
+    const isMockEnabled = deps.allowMock !== false
+        && (process.env.MOCK_AUTH === '1' || process.env.MOCK_AUTH === 'true');
 
     const latency = Number.parseInt(process.env.MOCK_LATENCY_MS || '0', 10) || 0;
     const failurePct = Number.parseFloat(process.env.MOCK_FAIL_PCT || '0') || 0;

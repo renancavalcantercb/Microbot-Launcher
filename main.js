@@ -18,7 +18,10 @@ const log = require('electron-log');
 const { ipcMain } = require('electron');
 const AdmZip = require('adm-zip');
 const packageJson = require(path.join(__dirname, 'package.json'));
-const { resolveRuntimeProductConfig } = require(path.join(__dirname, 'libs', 'distribution-profile.js'));
+const {
+    isLocked: isDistributionLocked,
+    resolveRuntimeProductConfig
+} = require(path.join(__dirname, 'libs', 'distribution-profile.js'));
 // A packaged launcher runs only with the profile embedded at build time. There is no fallback:
 // without a valid profile it stops here instead of reaching for localhost or the environment.
 let productConfig;
@@ -109,7 +112,7 @@ async function loadLibraries() {
                 'mock-auth.js'
             ));
             if (typeof mockAuthHandler === 'function') {
-                mockAuthHandler({ ipcMain, log });
+                mockAuthHandler({ ipcMain, log, allowMock: !isDistributionLocked(productConfig) });
             } else {
                 log.error('mock-auth does not export a function');
             }

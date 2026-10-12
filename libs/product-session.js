@@ -43,6 +43,15 @@ class ProductSessionService {
         this.log.info?.(`Product API configured: ${this.apiBaseUrl}`);
         this.filePath = path.join(productDataDir, sessionFileName(this.apiBaseUrl, productConfig));
         this.legacyFilePath = path.join(productDataDir, SESSION_FILE);
+        if (productConfig.distribution?.locked) {
+            // A distributed launcher keeps one session file per environment and never reads the
+            // shared legacy file, so a staging token cannot be sent to production or the reverse.
+            this.filePath = path.join(
+                productDataDir,
+                `product-session-${productConfig.distribution.environment}.json`
+            );
+            this.legacyFilePath = this.filePath;
+        }
         this.loadedFromLegacyFile = false;
         this.statusPromise = null;
         this.onSessionInvalidated = typeof onSessionInvalidated === 'function'

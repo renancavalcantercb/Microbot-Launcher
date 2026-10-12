@@ -12,6 +12,8 @@ const { requireSameSourceCandidates } = require('../libs/launcher-release-public
 
 const root = path.join(__dirname, '..');
 const workRoot = path.join(root, '.release-work');
+let outputRoot = null;
+let testResults = null;
 // Short on purpose: deep node_modules paths exceed Windows path limits in longer worktree names.
 const worktree = path.join(workRoot, 'b');
 
@@ -27,6 +29,21 @@ function output(command, args, cwd) {
     return result.stdout.trim();
 }
 
+function runTests(cwd) {
+    const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm test -- --ci --coverage=false'], {
+        cwd,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024
+    });
+    const log = `${result.stdout || ''}\n${result.stderr || ''}`;
+    const line = (label) => (new RegExp(`^${label}:\\s+(.*)$`, 'm').exec(log) || [])[1] || null;
+    const summary = { suites: line('Test Suites'), tests: line('Tests'), passed: result.status === 0 };
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.writeFileSync(path.join(outputRoot, 'test-results.txt'), log, { flag: 'wx' });
+    if (!summary.passed) throw new Error(`tests failed on the npm ci tree: ${summary.tests || 'see test-results.txt'}`);
+    return summary;
+}
+
 function removeWorktree() {
     if (!fs.existsSync(worktree)) return;
     // Plain removal fails on long node_modules paths; the extended-length prefix does not.
@@ -36,12 +53,13 @@ function removeWorktree() {
 
 function main() {
     if (process.platform !== 'win32') throw new Error('The Windows installer must be built on Windows.');
+    // The build uses a worktree of HEAD, so uncommitted edits in this checkout are not included.
     if (output('git', ['status', '--porcelain', '--untracked-files=no'], root)) {
-        throw new Error('The working tree has uncommitted changes; candidates are built from the committed HEAD only.');
+        console.warn('Warning: this checkout has uncommitted changes. They are NOT part of the candidates.');
     }
     const commit = output('git', ['rev-parse', 'HEAD'], root);
     const version = JSON.parse(output('git', ['show', 'HEAD:package.json'], root)).version;
-    const outputRoot = path.join(workRoot, 'candidates', version);
+    outputRoot = path.join(workRoot, 'candidates', version);
     if (fs.existsSync(outputRoot)) throw new Error(`candidates already exist: ${outputRoot}`);
     removeWorktree();
 
@@ -54,6 +72,9 @@ function main() {
         if (output('git', ['status', '--porcelain', '--untracked-files=no'], worktree)) {
             throw new Error('product:sync changed package.json; commit the synchronized file first.');
         }
+
+        // The installers carry the npm ci dependency tree, so the tests must run on that tree.
+        testResults = runTests(worktree);
 
         for (const profile of PROFILE_NAMES) {
             run(process.execPath, [
@@ -76,6 +97,12 @@ function main() {
     const summary = {
         version,
         sourceCommit: commit,
+        testsOnNpmCiTree: testResults,
+        dependencyVersions: {
+            electron: staging.tools.electron,
+            electronBuilder: staging.tools.electronBuilder,
+            node: staging.tools.node
+        },
         candidates: [staging, production].map((candidate) => ({
             profile: candidate.profile,
             file: path.join(outputRoot, candidate.profile, candidate.file),

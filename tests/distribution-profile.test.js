@@ -262,3 +262,81 @@ describe('packaging', () => {
         expect(packageJson.build.files).toContain(profileLib.PROFILE_FILE);
     });
 });
+
+describe('session storage and development tools in a distributed launcher', () => {
+    const { ProductSessionService } = require('../libs/product-session');
+    const mockAuth = require('../libs/mock-auth');
+    const secretStore = {
+        isAvailable: () => true,
+        protect: (value) => ({ protection: 'test', value: Buffer.from(value).toString('base64') }),
+        reveal: (value) => Buffer.from(value.value, 'base64').toString('utf8')
+    };
+    const session = {
+        tokenType: 'Bearer',
+        accessToken: 'mbc_at_selector_123.secret_access_value_abcdefghijklmnopqrstuvwxyz',
+        accessExpiresAt: new Date(Date.now() + 900000).toISOString(),
+        refreshToken: 'mbc_rt_selector_123.secret_refresh_value_abcdefghijklmnopqrstuvwxyz',
+        refreshExpiresAt: new Date(Date.now() + 86400000).toISOString(),
+        device: { id: 'device-id', name: 'Test PC' }
+    };
+    const service = (dir, productConfig) => new ProductSessionService({
+        axios: {},
+        fs,
+        path,
+        productDataDir: dir,
+        productConfig,
+        packageJson: { version: '3.2.11' },
+        secretStore,
+        installationIdentity: { getOrCreate: () => 'id' },
+        log: { warn: jest.fn(), info: jest.fn() },
+        environment: {}
+    });
+
+    test('staging and production keep separate session files', () => withTempDir((dir) => {
+        const staging = service(dir, lockedConfig('staging'));
+        const production = service(dir, lockedConfig('production'));
+        expect(path.basename(staging.filePath)).toBe('product-session-staging.json');
+        expect(path.basename(production.filePath)).toBe('product-session-production.json');
+        staging.save(session);
+        expect(production.load()).toBeNull();
+        expect(staging.load().device.id).toBe('device-id');
+    }));
+
+    test('a distributed launcher never reads the shared legacy session file', () => withTempDir((dir) => {
+        const development = service(dir, baseProductConfig);
+        development.save(session);
+        expect(fs.existsSync(path.join(dir, 'product-session.json'))).toBe(true);
+        for (const name of ['staging', 'production']) {
+            const locked = service(dir, lockedConfig(name));
+            expect(locked.legacyFilePath).toBe(locked.filePath);
+            expect(locked.load()).toBeNull();
+        }
+        expect(fs.existsSync(path.join(dir, 'product-session.json'))).toBe(true);
+    }));
+
+    test('mock authentication stays off in a distributed launcher even with MOCK_AUTH set', async () => {
+        const original = process.env.MOCK_AUTH;
+        process.env.MOCK_AUTH = '1';
+        try {
+            const handlers = new Map();
+            const ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };
+            mockAuth({ ipcMain, log: log(), allowMock: false });
+            expect(await handlers.get('auth:status')(null)).toEqual({ authenticated: true, mock: false });
+        } finally {
+            if (original === undefined) delete process.env.MOCK_AUTH;
+            else process.env.MOCK_AUTH = original;
+        }
+    });
+
+    test('the signed production configuration keeps the profile packaging settings', () => {
+        const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+        const config = require('../libs/windows-signing-config').createWindowsProductionConfig(packageJson.build, {
+            MICROBOT_CUT_WINDOWS_SIGNING_MODE: 'pfx',
+            MICROBOT_CUT_WINDOWS_PUBLISHER_NAME: 'Test Publisher',
+            WIN_CSC_LINK: 'x',
+            WIN_CSC_KEY_PASSWORD: 'y'
+        });
+        expect(config.beforePack).toBe('scripts/require-distribution-profile.js');
+        expect(config.files).toContain(profileLib.PROFILE_FILE);
+    });
+});
