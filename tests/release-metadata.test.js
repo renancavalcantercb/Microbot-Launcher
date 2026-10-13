@@ -15,7 +15,7 @@ describe('Windows installer release metadata', () => {
     });
 
     it('keeps package.json and package-lock.json on the same launcher version', () => {
-        expect(packageJson.version).toBe('3.2.11');
+        expect(packageJson.version).toBe('3.2.12');
         expect(packageLock.version).toBe(packageJson.version);
         expect(packageLock.packages[''].version).toBe(packageJson.version);
     });
