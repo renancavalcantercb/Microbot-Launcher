@@ -24,6 +24,9 @@ module.exports = async function (deps) {
     const { buildPluginRepositoryVmArgs } = require(
         path.join(__dirname, 'plugin-repository-settings.js')
     );
+    const { ProfilePrivacyPolicy } = require(
+        path.join(__dirname, 'profile-privacy-policy.js')
+    );
     const { TELEMETRY_PROGRAM_ARG, withTelemetryVmArg } = require(
         path.join(__dirname, 'telemetry-flags.js')
     );
@@ -73,6 +76,24 @@ module.exports = async function (deps) {
     if (clientHome) {
         fs.mkdirSync(path.join(clientHome, '.runelite'), { recursive: true });
         configuredProductVmArgs.push(`-Duser.home=${clientHome}`);
+    }
+    // Privacy defaults for the Cut client profiles (B-3.8). Runs before every client start; if it was
+    // needed and failed, the client is not started (an older client would use unsafe defaults).
+    const runeliteDirectory = path.join(clientHome || os.homedir(), '.runelite');
+    const profilePrivacyPolicy =
+        deps.profilePrivacyPolicy ||
+        new ProfilePrivacyPolicy({
+            fs,
+            path,
+            runeliteDir: runeliteDirectory,
+            productDataDir: deps.productDataDir || microbotDir,
+            log
+        });
+    async function enforcePrivacyPolicy(commandArgs) {
+        const profileArg = commandArgs.find((arg) => arg.startsWith('-profile='));
+        await profilePrivacyPolicy.apply({
+            profileName: profileArg ? profileArg.slice('-profile='.length) : null
+        });
     }
     async function productVmArgsForLaunch() {
         let selected = [...configuredProductVmArgs];
@@ -197,6 +218,7 @@ module.exports = async function (deps) {
                     );
                 }
 
+                await enforcePrivacyPolicy(commandArgs);
                 const clientAuthorization = await createClientAuthorization(version);
                 clientReleaseHealth?.begin?.(version);
 
@@ -280,6 +302,13 @@ module.exports = async function (deps) {
                 commandArgs.unshift(
                     '--add-opens=java.desktop/sun.awt=ALL-UNNAMED'
                 );
+            }
+
+            try {
+                await enforcePrivacyPolicy(commandArgs);
+            } catch (error) {
+                log.error(`Client not started: ${error.message}`);
+                return { error: error.message };
             }
 
             try {

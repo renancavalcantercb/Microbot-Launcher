@@ -27,7 +27,9 @@ function isUnder(candidate, directory) {
  * Wraps `fs` so that any mutating call that touches a path under `guardedDirectory` throws and
  * is recorded. `renameSync` is checked on both ends (a rename removes the source). Reads pass.
  */
-function guardDirectory(realFs, guardedDirectory) {
+function guardDirectory(realFs, guardedDirectory, { allow = [] } = {}) {
+    const guarded = (candidate) =>
+        isUnder(candidate, guardedDirectory) && !allow.some((dir) => isUnder(candidate, dir));
     const violations = [];
     const wrapped = new Proxy(realFs, {
         get(target, property) {
@@ -35,13 +37,13 @@ function guardDirectory(realFs, guardedDirectory) {
             if (typeof value !== 'function') return value;
             return (...args) => {
                 let touches = (PATH_ARGS[property] || []).some((index) =>
-                    isUnder(args[index], guardedDirectory)
+                    guarded(args[index])
                 );
                 if (
                     property === 'openSync' &&
                     typeof args[1] === 'string' &&
                     WRITE_FLAGS.test(args[1]) &&
-                    isUnder(args[0], guardedDirectory)
+                    guarded(args[0])
                 ) {
                     touches = true;
                 }
