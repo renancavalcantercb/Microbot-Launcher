@@ -4,6 +4,7 @@ const { spawnSync } = require('child_process');
 
 const { PROFILE_NAMES } = require('../libs/distribution-profile');
 const { requireSameSourceCandidates } = require('../libs/launcher-release-publication');
+const { RUNTIME_SOURCE_DIRECTORY } = require('../libs/distribution-build');
 
 // Builds the staging and production installers from one clean checkout of HEAD:
 //   node scripts/build-candidates.js
@@ -70,6 +71,14 @@ function main() {
 
     try {
         run('git', ['worktree', 'add', '--detach', worktree, commit], root, 'git worktree add');
+        // The Java runtime image is a build output (git-ignored). The worktree gets a copy, and
+        // build-distribution verifies it against the pin in config/java-runtime.json before and
+        // after packing.
+        const runtimeImage = path.join(root, RUNTIME_SOURCE_DIRECTORY);
+        if (!fs.existsSync(path.join(runtimeImage, 'runtime-manifest.json'))) {
+            throw new Error(`the Java runtime image is missing: build it with scripts/build-java-runtime.js (${runtimeImage})`);
+        }
+        fs.cpSync(runtimeImage, path.join(worktree, RUNTIME_SOURCE_DIRECTORY), { recursive: true });
         run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm ci'], worktree, 'npm ci');
 
         // package.json must already match product-config.js: syncing may not change anything.
@@ -118,6 +127,7 @@ function main() {
             sha512Base64: candidate.sha512Base64,
             embeddedProfileSha256: candidate.embeddedProfileSha256,
             appAsarSha256: candidate.appAsarSha256,
+            embeddedRuntime: candidate.embeddedRuntime,
             effectiveConfiguration: candidate.effectiveConfiguration
         }))
     };

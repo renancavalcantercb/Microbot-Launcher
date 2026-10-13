@@ -110,6 +110,20 @@ function main() {
         { encoding: 'utf8', flag: 'wx' }
     );
 
+    // Provenance of the Java runtime that the installer carries, read from the packed app.
+    const runtimeManifest = JSON.parse(
+        fs.readFileSync(path.join(resources, 'java-runtime', 'runtime-manifest.json'), 'utf8')
+    );
+    const embeddedRuntime = {
+        javaVersion: runtimeManifest.javaVersion,
+        fullVersion: runtimeManifest.fullVersion,
+        archive: runtimeManifest.archive,
+        signingKeyFingerprint: runtimeManifest.signingKeyFingerprint,
+        sources: runtimeManifest.sources,
+        modules: runtimeManifest.modules,
+        files: runtimeManifest.files.length,
+        imageSha256: runtimeManifest.imageSha256
+    };
     const asarSha256 = require('crypto').createHash('sha256').update(fs.readFileSync(asarPath)).digest('hex');
     const candidate = {
         kind: 'launcher-candidate',
@@ -125,6 +139,7 @@ function main() {
         effectiveConfiguration: effectiveChannelConfiguration(profile),
         embeddedProfileSha256: packed.embeddedProfileSha256,
         appAsarSha256: asarSha256,
+        embeddedRuntime,
         packedPackages: packed.packageCount,
         tools: {
             electron: require('electron/package.json').version,
