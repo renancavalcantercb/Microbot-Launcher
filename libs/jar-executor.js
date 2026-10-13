@@ -24,6 +24,9 @@ module.exports = async function (deps) {
     const { buildPluginRepositoryVmArgs } = require(
         path.join(__dirname, 'plugin-repository-settings.js')
     );
+    const { TELEMETRY_PROGRAM_ARG, withTelemetryVmArg } = require(
+        path.join(__dirname, 'telemetry-flags.js')
+    );
     const STARTUP_WINDOW_MS = deps.startupWindowMs || 20000;
     const MAX_CAPTURED_STDERR = 64 * 1024;
     const pluginDevelopmentEnvironmentVariable =
@@ -72,13 +75,15 @@ module.exports = async function (deps) {
         configuredProductVmArgs.push(`-Duser.home=${clientHome}`);
     }
     async function productVmArgsForLaunch() {
+        let selected = [...configuredProductVmArgs];
         if (typeof deps.productVmArgsForLaunch === 'function') {
-            const selected = await deps.productVmArgsForLaunch({
+            const override = await deps.productVmArgsForLaunch({
                 configuredArgs: [...configuredProductVmArgs]
             });
-            if (Array.isArray(selected)) return selected;
+            if (Array.isArray(override)) selected = override;
         }
-        return [...configuredProductVmArgs];
+        // Applied after any override so no channel selection can drop it (A3-1, decision 9).
+        return withTelemetryVmArg(selected);
     }
     const clientTicketBroker = deps.clientTicketBroker || new ClientTicketBroker({
         productSessionService,
@@ -157,7 +162,8 @@ module.exports = async function (deps) {
                     ...GC_FLAGS,
                     ...productVmArgs,
                     '-jar',
-                    jarPath
+                    jarPath,
+                    TELEMETRY_PROGRAM_ARG
                 ];
 
                 // apply proxy args (done differently depending on client version)
@@ -231,6 +237,7 @@ module.exports = async function (deps) {
                 ...productVmArgs,
                 '-jar',
                 jarPath,
+                TELEMETRY_PROGRAM_ARG,
                 '-clean-jagex-launcher'
             ];
 
