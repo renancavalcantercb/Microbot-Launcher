@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "supplier": "Eclipse Adoptium, Eclipse Temurin 17 (HotSpot), Windows x64",
+  "javaVersion": "17.0.20.1",
+  "fullVersion": "17.0.20.1+1",
+  "archive": {
+    "name": "OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip",
+    "sha256": "e53a79c3c3d86865bd7e787903884331068e71321714ffd44f145785affc7cb0",
+    "url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip",
+    "signatureUrl": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip.sig",
+    "checksumUrl": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip.sha256.txt"
+  },
+  "signing": {
+    "keyFingerprint": "3B04D753C9050D9A5D343F39843C48A565F8F04B",
+    "publicKeyFile": "config/java-runtime/adoptium-signing-key.asc",
+    "keySource": "https://packages.adoptium.net/artifactory/api/gpg/key/public"
+  },
+  "sources": {
+    "jdk17u": "79597447bd94ff9f8216e2e3a573d5261ee49f2e",
+    "temurinBuild": "e6ba7dec3d07654074559310376a3ae89da5f4ac"
+  },
+  "jlink": {
+    "modules": [
+      "java.base",
+      "java.compiler",
+      "java.datatransfer",
+      "java.desktop",
+      "java.instrument",
+      "java.logging",
+      "java.management",
+      "java.naming",
+      "java.net.http",
+      "java.prefs",
+      "java.security.jgss",
+      "java.security.sasl",
+      "java.sql",
+      "java.xml",
+      "jdk.attach",
+      "jdk.charsets",
+      "jdk.compiler",
+      "jdk.crypto.ec",
+      "jdk.crypto.mscapi",
+      "jdk.httpserver",
+      "jdk.jcmd",
+      "jdk.jfr",
+      "jdk.localedata",
+      "jdk.management",
+      "jdk.management.jfr",
+      "jdk.naming.dns",
+      "jdk.net",
+      "jdk.security.auth",
+      "jdk.unsupported",
+      "jdk.zipfs"
+    ],
+    "options": [
+      "--strip-debug",
+      "--no-header-files",
+      "--no-man-pages",
+      "--compress=2"
+    ]
+  },
+  "image": {
+    "directory": "java-runtime",
+    "sha256": "2ea1fb627d08e0e86110e70f721e54b0097493ec7d13410f738f0752d2156d82"
+  }
+}
