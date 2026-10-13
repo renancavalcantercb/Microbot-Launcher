@@ -320,6 +320,19 @@ module.exports = async function (deps) {
         return { error: message };
     }
 
+    // client.minimumLauncherVersion of a signed release (enforced from launcher 3.2.12).
+    const { assertLauncherSupportsClient } = require(path.join(
+        projectDir,
+        'libs',
+        'launcher-compatibility.js'
+    ));
+    function assertClientRunsOnThisLauncher(release) {
+        assertLauncherSupportsClient({
+            launcherVersion: packageJson.version,
+            client: release.client
+        });
+    }
+
     function signedClientEntry(release, filePath, manifestService) {
         return {
             version: release.client.version,
@@ -350,6 +363,7 @@ module.exports = async function (deps) {
         ) {
             throw new Error(`client ${entry.version} registry metadata does not match its signed manifest`);
         }
+        assertClientRunsOnThisLauncher(release);
     }
 
     async function verifyClientBeforeLaunch(version, context) {
@@ -379,6 +393,7 @@ module.exports = async function (deps) {
             }
         }
         if (release?.client?.version === version) {
+            assertClientRunsOnThisLauncher(release);
             const entry = signedClientEntry(release, filePath, context.manifestService);
             await verifiedClientReleaseStore.verifyFile(entry, filePath);
             verifiedClientReleaseStore.record(entry);
@@ -545,6 +560,7 @@ module.exports = async function (deps) {
                         error: `Client version ${version} is not the current signed ${context.channel} release`
                     };
                 }
+                assertClientRunsOnThisLauncher(release);
                 event.sender.send('progress', {
                     percent: 10,
                     status: `Downloading verified client ${version}...`

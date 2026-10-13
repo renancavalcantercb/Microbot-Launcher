@@ -227,6 +227,8 @@ describe('client jar cleanup and listing with an isolated home', () => {
         async function signedReleaseHandlers({
             downloadedArtifact,
             signedArtifact,
+            minimumLauncherVersion = '3.2.10',
+            launcherVersion = '3.2.10',
             authorizeReleaseChannel = jest.fn().mockResolvedValue({
                 releaseCohort: 'beta',
                 allowedReleaseChannels: ['production', 'staging']
@@ -254,7 +256,7 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 },
                 client: {
                     version,
-                    minimumLauncherVersion: '3.2.10',
+                    minimumLauncherVersion,
                     artifactPath: `releases/artifacts/client/${version}/client.jar`,
                     size: signedArtifact.length,
                     sha256: crypto.createHash('sha256').update(signedArtifact).digest('hex')
@@ -284,7 +286,7 @@ describe('client jar cleanup and listing with an isolated home', () => {
                 axios: releaseAxios,
                 microbotDir,
                 productDataDir: microbotDir,
-                packageJson: { version: '3.2.10' },
+                packageJson: { version: launcherVersion },
                 path,
                 log: { info: jest.fn(), error: jest.fn() },
                 dialog: {},
@@ -337,6 +339,42 @@ describe('client jar cleanup and listing with an isolated home', () => {
                     responseType: 'stream'
                 })
             );
+        });
+
+        test('refuses a signed client that needs a newer launcher, before downloading it', async () => {
+            const artifact = Buffer.from('signed-client-jar');
+            const { releaseHandlers, releaseAxios, version } = await signedReleaseHandlers({
+                downloadedArtifact: artifact,
+                signedArtifact: artifact,
+                minimumLauncherVersion: '3.2.13',
+                launcherVersion: '3.2.12'
+            });
+            const sender = { send: jest.fn() };
+
+            const result = await releaseHandlers['download-client']({ sender }, version);
+
+            expect(result.error).toContain('needs Microbot Cut Launcher 3.2.13 or newer');
+            expect(result.error).toContain('3.2.12');
+            expect(releaseAxios).not.toHaveBeenCalled();
+            expect(fs.existsSync(path.join(microbotDir, `microbot-${version}.jar`))).toBe(false);
+            expect(exists('downloaded_clients.json')).toBe(false);
+        });
+
+        test.each([
+            ['the same version', '3.2.12', '3.2.12'],
+            ['an older minimum (3.2.11 manifests keep working)', '3.2.10', '3.2.12'],
+            ['a minimum equal to the previous launcher', '3.2.11', '3.2.12']
+        ])('downloads when the client needs %s', async (_label, minimum, launcher) => {
+            const artifact = Buffer.from('signed-client-jar');
+            const { releaseHandlers, version } = await signedReleaseHandlers({
+                downloadedArtifact: artifact,
+                signedArtifact: artifact,
+                minimumLauncherVersion: minimum,
+                launcherVersion: launcher
+            });
+            await expect(
+                releaseHandlers['download-client']({ sender: { send: jest.fn() } }, version)
+            ).resolves.toMatchObject({ success: true, verified: true });
         });
 
         test('limits renderer progress updates while streaming a signed client', async () => {
