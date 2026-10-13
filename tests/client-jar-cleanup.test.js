@@ -52,7 +52,7 @@ describe('client jar cleanup and listing with an isolated home', () => {
 
     beforeEach(() => {
         homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-home-'));
-        microbotDir = path.join(homeDir, '.microbot');
+        microbotDir = path.join(homeDir, '.microbot-cut');
         fs.mkdirSync(microbotDir);
         jest.resetModules();
         jest.doMock('os', () => ({

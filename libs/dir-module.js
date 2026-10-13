@@ -33,15 +33,16 @@ function resolveDataDirectories(homeDirectory) {
     };
 }
 
-function resolveActiveDataDirectory(fileSystem, productDirectory, legacyDirectory) {
-    if (!legacyDirectory) return productDirectory;
-    const marker = path.join(productDirectory, IMPORT_MARKER);
-    return fileSystem.existsSync(marker) ? productDirectory : legacyDirectory;
+// The launcher only ever works in its own product directory. The legacy directory belongs to
+// the original Microbot: it is read by the explicit import and never selected as active, so no
+// launcher write (accounts, JARs, TTL, removal) can reach it. The arguments are kept so callers
+// and tests can state the legacy path and see that it is ignored.
+function resolveActiveDataDirectory(_fileSystem, productDirectory, _legacyDirectory) {
+    return productDirectory;
 }
 
 const homeDir = os.homedir();
 const { productDataDir, legacyDataDir } = resolveDataDirectories(homeDir);
-const { IMPORT_MARKER } = require('./data-directory-importer');
 const microbotDir = resolveActiveDataDirectory(
     fsSync,
     productDataDir,

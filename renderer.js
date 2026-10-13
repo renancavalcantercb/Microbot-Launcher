@@ -1861,8 +1861,8 @@ function setupHamburgerMenu() {
     });
 
     const importItem = document.getElementById('import-legacy-data');
-    importItem?.addEventListener('click', async () => {
-        hideMenu();
+    const IMPORT_DECLINED_KEY = 'legacyImportDeclined';
+    async function runLegacyImport({ fromOffer = false } = {}) {
         const status = await window.electron.dataDirectoryStatus();
         if (status?.importComplete) {
             window.electron.errorAlert(
@@ -1870,24 +1870,41 @@ function setupHamburgerMenu() {
             );
             return;
         }
+        if (status?.productHasData) {
+            window.electron.errorAlert(
+                'This launcher already has its own accounts, so nothing was imported.'
+            );
+            return;
+        }
         const confirmed = await window.electron.showConfirmationDialog(
             'Import existing data?',
-            'Active accounts, settings and recognized client JARs will be copied to the new product directory. The original directory will remain unchanged.',
+            'Accounts, settings and recognized client JARs from the original Microbot directory can be imported. Sessions are re-protected with the secure storage of this launcher and no plain-text copy is written. The original directory is only read and is never changed. If an account cannot be imported, sign in again.',
             'Import Existing Data',
             'Import',
-            'Cancel',
+            fromOffer ? 'Not now' : 'Cancel',
             { defaultId: 1, cancelId: 1, confirmIndex: 0 }
         );
-        if (confirmed !== true) return;
+        if (confirmed !== true) {
+            if (fromOffer) {
+                try {
+                    localStorage.setItem(IMPORT_DECLINED_KEY, '1');
+                } catch (_) {}
+            }
+            return;
+        }
 
         const result = await window.electron.importLegacyData();
         if (result?.error) {
             window.electron.errorAlert(`Data import failed: ${result.error}`);
             return;
         }
+        const accountsNote =
+            result.accounts === 'undecryptable'
+                ? ' The saved accounts could not be decrypted here, so please sign in again.'
+                : '';
         const restart = await window.electron.showConfirmationDialog(
             'Import complete',
-            `${result.files?.length || 0} verified file(s) were copied. Restart the launcher now to use the new directory.`,
+            `${result.files?.length || 0} file(s) were imported.${accountsNote} Restart the launcher now to use the new directory.`,
             'Restart Required',
             'Restart now',
             'Later',
@@ -1896,7 +1913,22 @@ function setupHamburgerMenu() {
         if (restart === true) {
             await window.electron.relaunchLauncher();
         }
+    }
+    importItem?.addEventListener('click', async () => {
+        hideMenu();
+        await runLegacyImport();
     });
+    // First start with nothing of its own and data from the original Microbot: offer the import
+    // once, unless it was declined; the menu entry stays available.
+    (async () => {
+        try {
+            if (localStorage.getItem(IMPORT_DECLINED_KEY)) return;
+        } catch (_) {}
+        try {
+            const status = await window.electron.dataDirectoryStatus();
+            if (status?.offerImport) await runLegacyImport({ fromOffer: true });
+        } catch (_) {}
+    })();
 
     let hideTimeout = null;
     const scheduleHide = () => {

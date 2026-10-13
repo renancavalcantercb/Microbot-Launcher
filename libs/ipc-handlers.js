@@ -125,6 +125,14 @@ module.exports = async function (deps) {
         'libs',
         'data-directory-importer.js'
     ));
+    const { ElectronSafeStorageSecretStore } = require(path.join(
+        projectDir,
+        'libs',
+        'account-secret-store.js'
+    ));
+    const secretStore = safeStorage
+        ? new ElectronSafeStorageSecretStore(safeStorage)
+        : null;
     const dataDirectoryImporter =
         productDataDir && legacyDataDir
             ? new DataDirectoryImporter({
@@ -133,7 +141,8 @@ module.exports = async function (deps) {
                   productDataDir,
                   legacyDataDir,
                   productId: productConfig.productId,
-                  log
+                  log,
+                  secretStore
               })
             : null;
 
@@ -170,14 +179,6 @@ module.exports = async function (deps) {
         'libs',
         'account-repository.js'
     ));
-    const { ElectronSafeStorageSecretStore } = require(path.join(
-        projectDir,
-        'libs',
-        'account-secret-store.js'
-    ));
-    const secretStore = safeStorage
-        ? new ElectronSafeStorageSecretStore(safeStorage)
-        : null;
     const { ProductSessionService } = require(path.join(
         projectDir,
         'libs',

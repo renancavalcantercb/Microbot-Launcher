@@ -167,7 +167,7 @@ describe('installer identity and data isolation', () => {
         }
         expect(staging.legacyDataDir).toBeNull();
         expect(staging.active).toBe(staging.productDataDir);
-        expect(production.active).toBe(production.legacyDataDir);
+        expect(production.active).toBe(production.productDataDir);
     });
 
     test('production data locations are unchanged', () => {

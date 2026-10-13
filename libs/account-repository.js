@@ -11,6 +11,63 @@ function publicAccount(account) {
     return result;
 }
 
+/**
+ * Turns the original Microbot's plain accounts array into the schema 2 pieces (accounts without
+ * a session id, plus protected sessions). Everything happens in memory; the caller decides where
+ * the protected result is written. Every session is verified by decrypting it again.
+ */
+function convertLegacyAccounts(legacyAccounts, secretStore, createSessionRef = randomUUID) {
+    if (
+        !secretStore ||
+        typeof secretStore.isAvailable !== 'function' ||
+        !secretStore.isAvailable()
+    ) {
+        throw new Error('Secure account storage is unavailable');
+    }
+    const sessionRefs = new Map();
+    const sessions = {};
+    const accounts = legacyAccounts.map((account) => {
+        if (
+            !account ||
+            typeof account.accountId !== 'string' ||
+            account.accountId.length === 0 ||
+            typeof account.sessionId !== 'string' ||
+            account.sessionId.length === 0
+        ) {
+            throw new Error('Legacy accounts file contains an invalid account');
+        }
+
+        let sessionRef = sessionRefs.get(account.sessionId);
+        if (!sessionRef) {
+            for (let attempt = 0; attempt < 100; attempt++) {
+                sessionRef = createSessionRef();
+                if (
+                    typeof sessionRef === 'string' &&
+                    sessionRef.length > 0 &&
+                    !sessions[sessionRef]
+                ) {
+                    break;
+                }
+                sessionRef = null;
+            }
+            if (!sessionRef) {
+                throw new Error('Could not create a unique Jagex session reference');
+            }
+            const protectedSession = secretStore.protect(account.sessionId);
+            if (secretStore.reveal(protectedSession) !== account.sessionId) {
+                throw new Error('Protected Jagex session verification failed');
+            }
+            sessionRefs.set(account.sessionId, sessionRef);
+            sessions[sessionRef] = protectedSession;
+        }
+
+        const { sessionId, ...metadata } = account;
+        return { ...metadata, sessionRef };
+    });
+
+    return { accounts, sessions };
+}
+
 class AccountRepository {
     constructor({
         fs,
@@ -140,46 +197,11 @@ class AccountRepository {
             throw new Error('Secure account storage is unavailable');
         }
 
-        const sessionRefs = new Map();
-        const sessions = {};
-        const accounts = document.accounts.map((account) => {
-            if (
-                !account ||
-                typeof account.accountId !== 'string' ||
-                account.accountId.length === 0 ||
-                typeof account.sessionId !== 'string' ||
-                account.sessionId.length === 0
-            ) {
-                throw new Error('Legacy accounts file contains an invalid account');
-            }
-
-            let sessionRef = sessionRefs.get(account.sessionId);
-            if (!sessionRef) {
-                for (let attempt = 0; attempt < 100; attempt++) {
-                    sessionRef = this.createSessionRef();
-                    if (
-                        typeof sessionRef === 'string' &&
-                        sessionRef.length > 0 &&
-                        !sessions[sessionRef]
-                    ) {
-                        break;
-                    }
-                    sessionRef = null;
-                }
-                if (!sessionRef) {
-                    throw new Error('Could not create a unique Jagex session reference');
-                }
-                const protectedSession = this.secretStore.protect(account.sessionId);
-                if (this.secretStore.reveal(protectedSession) !== account.sessionId) {
-                    throw new Error('Protected Jagex session verification failed');
-                }
-                sessionRefs.set(account.sessionId, sessionRef);
-                sessions[sessionRef] = protectedSession;
-            }
-
-            const { sessionId, ...metadata } = account;
-            return { ...metadata, sessionRef };
-        });
+        const { accounts, sessions } = convertLegacyAccounts(
+            document.accounts,
+            this.secretStore,
+            this.createSessionRef
+        );
 
         const migrated = {
             legacy: false,
@@ -397,6 +419,7 @@ class AccountRepository {
 
 module.exports = {
     AccountRepository,
+    convertLegacyAccounts,
     ACCOUNT_SCHEMA_VERSION,
     publicAccount
 };

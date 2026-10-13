@@ -4,6 +4,7 @@ const axios = require('axios');
 const http = require('http');
 const log = require('electron-log');
 const { getAvailableBrowser } = require('./browser-util.js');
+const { describeHttpFailure } = require('./http-failure.js');
 
 let accountRepository = null;
 
@@ -197,10 +198,7 @@ async function getToken(code) {
         // Return the ID token
         return response.data.id_token;
     } catch (error) {
-        log.error(
-            `Error getting token: ${error.response ? error.response.data : error.message
-            }`
-        );
+        log.error(`Error getting token: ${describeHttpFailure(error)}`);
         return null;
     }
 }
@@ -221,10 +219,7 @@ async function getSessionId(idToken) {
         log.info('Session ID fetched successfully.');
         return response.data.sessionId;
     } catch (error) {
-        log.error(
-            `Error getting session ID: ${error.response ? error.response.data : error.message
-            }`
-        );
+        log.error(`Error getting session ID: ${describeHttpFailure(error)}`);
         return null;
     }
 }
