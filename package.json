@@ -76,6 +76,12 @@
       "distribution-profile.json"
     ],
     "beforePack": "scripts/require-distribution-profile.js",
+    "extraResources": [
+      {
+        "from": ".release-work/java-runtime/image",
+        "to": "java-runtime"
+      }
+    ],
     "directories": {
       "buildResources": "build"
     },

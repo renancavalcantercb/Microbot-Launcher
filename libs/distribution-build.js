@@ -2,7 +2,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
+const { RuntimeIntegrityError, verifyEmbeddedRuntime } = require('./embedded-runtime');
 const {
+    RUNTIME_DIRECTORY,
     PROFILE_FILE,
     PROFILE_NAMES,
     DistributionProfileError,
@@ -12,6 +14,35 @@ const {
 } = require('./distribution-profile');
 
 // Build-time helpers for the one-installer-per-environment strategy (SITE-DOWNLOAD.md, L6).
+
+// Where scripts/build-java-runtime.js leaves the verified image that electron-builder copies to
+// resources/java-runtime (package.json build.extraResources).
+const RUNTIME_SOURCE_DIRECTORY = path.join('.release-work', 'java-runtime', 'image');
+const RUNTIME_PIN_FILE = path.join('config', 'java-runtime.json');
+
+function checkRuntimeImage(runtimeDir, expected, label) {
+    try {
+        verifyEmbeddedRuntime({ fs, path, runtimeDir, expected });
+    } catch (error) {
+        if (error instanceof RuntimeIntegrityError) {
+            throw new DistributionProfileError(`${label}: ${error.message}`);
+        }
+        throw error;
+    }
+}
+
+function loadRuntimePin(root) {
+    let pin;
+    try {
+        pin = JSON.parse(fs.readFileSync(path.join(root, RUNTIME_PIN_FILE), 'utf8'));
+    } catch (error) {
+        throw new DistributionProfileError(`${RUNTIME_PIN_FILE} cannot be read: ${error.message}`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(pin?.image?.sha256 || '')) {
+        throw new DistributionProfileError(`${RUNTIME_PIN_FILE} has no image digest; build the runtime with --write-pin first`);
+    }
+    return { directory: RUNTIME_DIRECTORY, javaVersion: pin.javaVersion, imageSha256: pin.image.sha256 };
+}
 
 function parseBuildArguments(argv) {
     const options = { profile: null, outputDirectory: null, allowDirty: false };
@@ -49,14 +80,18 @@ async function requireDistributionProfile(context) {
             `${PROFILE_FILE} is missing or unreadable; build with "node scripts/build-distribution.js --profile <staging|production>" (${error.message})`
         );
     }
-    validateProfile(raw, { requireSource: true });
+    const profile = validateProfile(raw, { requireSource: true });
+    // The runtime that will be copied into the installer must be the one the profile pins.
+    checkRuntimeImage(path.join(projectDir, RUNTIME_SOURCE_DIRECTORY), profile.embeddedRuntime, 'the Java runtime to embed');
 }
 
 // Writes the profile that electron-builder packs and returns how to remove it again. The file
 // is gitignored and exists only for the duration of one build.
 function embedProfile({ root, name, commit, version }) {
     const profile = loadProfileSource({ fs, path, root, name });
-    const text = serializeEmbeddedProfile(profile, { commit, version });
+    const runtime = loadRuntimePin(root);
+    checkRuntimeImage(path.join(root, RUNTIME_SOURCE_DIRECTORY), runtime, 'the Java runtime to embed');
+    const text = serializeEmbeddedProfile(profile, { commit, version }, runtime);
     const file = path.join(root, PROFILE_FILE);
     if (fs.existsSync(file)) throw new Error(`${PROFILE_FILE} already exists; remove the leftover file first`);
     fs.writeFileSync(file, text, { encoding: 'utf8', flag: 'wx' });
@@ -85,6 +120,13 @@ function verifyPackedApp({ asarApi, asarPath, resourcesDirectory, expectedProfil
     if (!entries.includes(PROFILE_FILE)) throw new Error('the packed app has no embedded distribution profile');
     const embedded = asarApi.extractFile(asarPath, PROFILE_FILE).toString('utf8');
     if (embedded !== expectedProfileText) throw new Error('the embedded distribution profile differs from the one that was built');
+    // What the installer will carry, not what the build meant to copy.
+    const pinned = JSON.parse(embedded).embeddedRuntime;
+    try {
+        verifyEmbeddedRuntime({ fs, path, runtimeDir: path.join(resourcesDirectory, RUNTIME_DIRECTORY), expected: pinned });
+    } catch (error) {
+        throw new Error(`the packed app has a wrong Java runtime: ${error.message}`);
+    }
     const config = asarApi.extractFile(asarPath, 'product-config.js').toString('utf8');
     if (!/updateFilesBase:\s*null/.test(config)) throw new Error('launcher auto-update is not disabled in the packed app');
     if (fs.existsSync(path.join(resourcesDirectory, 'app-update.yml'))) {
@@ -156,6 +198,7 @@ function effectiveChannelConfiguration(profile) {
 }
 
 module.exports = {
+    RUNTIME_SOURCE_DIRECTORY,
     effectiveChannelConfiguration,
     embedProfile,
     identityBuilderArguments,

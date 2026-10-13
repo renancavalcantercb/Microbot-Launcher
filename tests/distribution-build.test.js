@@ -6,9 +6,17 @@ const asar = require('@electron/asar');
 
 const build = require('../libs/distribution-build');
 const profileLib = require('../libs/distribution-profile');
+const { createRuntimeFixture } = require('./helpers/runtime-fixture');
 
 const root = path.join(__dirname, '..');
 const SOURCE = { commit: 'b'.repeat(40), version: '3.2.11' };
+const runtimeFixture = createRuntimeFixture();
+const RUNTIME = runtimeFixture.pin;
+afterAll(() => runtimeFixture.cleanup());
+
+function placeRuntime(destination) {
+    fs.cpSync(runtimeFixture.dir, destination, { recursive: true });
+}
 
 async function withTempDir(callback) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dist-build-'));
@@ -80,8 +88,31 @@ describe('beforePack hook', () => {
     test('passes with a valid embedded profile', async () => {
         await withTempDir(async (dir) => {
             const profile = profileLib.loadProfileSource({ fs, path, root, name: 'production' });
-            fs.writeFileSync(path.join(dir, profileLib.PROFILE_FILE), profileLib.serializeEmbeddedProfile(profile, SOURCE));
+            fs.writeFileSync(path.join(dir, profileLib.PROFILE_FILE), profileLib.serializeEmbeddedProfile(profile, SOURCE, RUNTIME));
+            placeRuntime(path.join(dir, build.RUNTIME_SOURCE_DIRECTORY));
             await expect(build.requireDistributionProfile({ packager: { projectDir: dir } })).resolves.toBeUndefined();
+        });
+    });
+
+    test('fails when the runtime to embed is missing, modified or not the pinned one', async () => {
+        await withTempDir(async (dir) => {
+            const profile = profileLib.loadProfileSource({ fs, path, root, name: 'production' });
+            fs.writeFileSync(path.join(dir, profileLib.PROFILE_FILE), profileLib.serializeEmbeddedProfile(profile, SOURCE, RUNTIME));
+            const image = path.join(dir, build.RUNTIME_SOURCE_DIRECTORY);
+            await expect(build.requireDistributionProfile({ packager: { projectDir: dir } }))
+                .rejects.toThrow('the Java runtime to embed');
+            placeRuntime(image);
+            fs.writeFileSync(path.join(image, 'lib', 'modules'), 'tampered');
+            await expect(build.requireDistributionProfile({ packager: { projectDir: dir } }))
+                .rejects.toThrow('modified file');
+            fs.rmSync(image, { recursive: true, force: true });
+            placeRuntime(image);
+            fs.writeFileSync(
+                path.join(dir, profileLib.PROFILE_FILE),
+                profileLib.serializeEmbeddedProfile(profile, SOURCE, { ...RUNTIME, imageSha256: 'f'.repeat(64) })
+            );
+            await expect(build.requireDistributionProfile({ packager: { projectDir: dir } }))
+                .rejects.toThrow('does not match');
         });
     });
 });
@@ -126,7 +157,7 @@ describe('installer identity', () => {
 describe('macOS-only files', () => {
     test('are rejected in the packed Windows app', async () => {
         const profileText = profileLib.serializeEmbeddedProfile(
-            profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE);
+            profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE, RUNTIME);
         await withTempDir(async (dir) => {
             const app = path.join(dir, 'app');
             fs.mkdirSync(path.join(app, 'node_modules', 'axios'), { recursive: true });
@@ -155,10 +186,17 @@ describe('embedProfile', () => {
                 path.join(dir, 'config', 'distribution', `${name}.json`)
             );
         }
+        fs.mkdirSync(path.join(dir, 'config'), { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, 'config', 'java-runtime.json'),
+            JSON.stringify({ javaVersion: RUNTIME.javaVersion, image: { sha256: RUNTIME.imageSha256 } })
+        );
+        placeRuntime(path.join(dir, build.RUNTIME_SOURCE_DIRECTORY));
         const embedded = build.embedProfile({ root: dir, name: 'staging', commit: SOURCE.commit, version: SOURCE.version });
         const file = path.join(dir, profileLib.PROFILE_FILE);
         expect(fs.readFileSync(file, 'utf8')).toBe(embedded.text);
         expect(profileLib.loadEmbeddedProfile({ fs, path, root: dir }).source).toEqual(SOURCE);
+        expect(profileLib.loadEmbeddedProfile({ fs, path, root: dir }).embeddedRuntime).toEqual(RUNTIME);
         expect(() => build.embedProfile({ root: dir, name: 'staging', commit: SOURCE.commit, version: SOURCE.version }))
             .toThrow('already exists');
         embedded.cleanup();
@@ -167,18 +205,40 @@ describe('embedProfile', () => {
             .toThrow('profile is required');
     }));
 
+    test('refuses to embed without a pinned runtime digest or with a different image', () => withTempDir((dir) => {
+        fs.mkdirSync(path.join(dir, 'config', 'distribution'), { recursive: true });
+        fs.copyFileSync(
+            path.join(root, 'config', 'distribution', 'staging.json'),
+            path.join(dir, 'config', 'distribution', 'staging.json')
+        );
+        const args = { root: dir, name: 'staging', commit: SOURCE.commit, version: SOURCE.version };
+        expect(() => build.embedProfile(args)).toThrow('java-runtime.json');
+        fs.writeFileSync(
+            path.join(dir, 'config', 'java-runtime.json'),
+            JSON.stringify({ javaVersion: RUNTIME.javaVersion, image: { sha256: null } })
+        );
+        expect(() => build.embedProfile(args)).toThrow('no image digest');
+        fs.writeFileSync(
+            path.join(dir, 'config', 'java-runtime.json'),
+            JSON.stringify({ javaVersion: RUNTIME.javaVersion, image: { sha256: 'f'.repeat(64) } })
+        );
+        placeRuntime(path.join(dir, build.RUNTIME_SOURCE_DIRECTORY));
+        expect(() => build.embedProfile(args)).toThrow('does not match');
+        expect(fs.existsSync(path.join(dir, profileLib.PROFILE_FILE))).toBe(false);
+    }));
+
     test('the staging and production builds of one commit differ only by their profile', () => {
         const staging = profileLib.serializeEmbeddedProfile(
-            profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE);
+            profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE, RUNTIME);
         const production = profileLib.serializeEmbeddedProfile(
-            profileLib.loadProfileSource({ fs, path, root, name: 'production' }), SOURCE);
+            profileLib.loadProfileSource({ fs, path, root, name: 'production' }), SOURCE, RUNTIME);
         expect(staging).not.toBe(production);
         expect(JSON.parse(staging).source).toEqual(JSON.parse(production).source);
     });
 });
 
 describe('packed app verification', () => {
-    async function packApp(dir, { profileText, productConfig, packages, updateFeed = false }) {
+    async function packApp(dir, { profileText, productConfig, packages, updateFeed = false, runtime = true }) {
         const app = path.join(dir, 'app');
         fs.mkdirSync(path.join(app, 'node_modules'), { recursive: true });
         fs.writeFileSync(path.join(app, 'product-config.js'), productConfig);
@@ -192,11 +252,12 @@ describe('packed app verification', () => {
         const asarPath = path.join(resources, 'app.asar');
         await asar.createPackage(app, asarPath);
         if (updateFeed) fs.writeFileSync(path.join(resources, 'app-update.yml'), 'provider: generic');
+        if (runtime) placeRuntime(path.join(resources, 'java-runtime'));
         return { asarPath, resourcesDirectory: resources };
     }
 
     const profileText = profileLib.serializeEmbeddedProfile(
-        profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE);
+        profileLib.loadProfileSource({ fs, path, root, name: 'staging' }), SOURCE, RUNTIME);
     const goodConfig = 'module.exports = { updateFilesBase: null };';
     const dependencies = ['axios', '@scope/pkg'];
 
@@ -209,12 +270,22 @@ describe('packed app verification', () => {
         });
     });
 
+    test('rejects an app whose Java runtime was modified after packing', async () => {
+        await withTempDir(async (dir) => {
+            const packed = await packApp(dir, { profileText, productConfig: goodConfig, packages: ['axios', '@scope/pkg'] });
+            fs.writeFileSync(path.join(packed.resourcesDirectory, 'java-runtime', 'bin', 'javaw.exe'), 'evil');
+            expect(() => build.verifyPackedApp({ asarApi: asar, ...packed, expectedProfileText: profileText, dependencies }))
+                .toThrow('wrong Java runtime');
+        });
+    });
+
     test.each([
         ['has no embedded profile', { profileText: null }, 'no embedded distribution profile'],
         ['embeds a different profile', { profileText: '{}\n' }, 'differs'],
         ['enables a launcher update feed', { productConfig: 'module.exports = { updateFilesBase: "https://x" };' }, 'auto-update'],
         ['ships an updater feed file', { updateFeed: true }, 'app-update.yml'],
-        ['lost a dependency (broken node_modules)', { packages: ['axios'] }, 'missing dependencies: @scope/pkg']
+        ['lost a dependency (broken node_modules)', { packages: ['axios'] }, 'missing dependencies: @scope/pkg'],
+        ['carries no Java runtime', { runtime: false }, 'wrong Java runtime']
     ])('rejects an app that %s', async (_label, overrides, fragment) => {
         await withTempDir(async (dir) => {
             const packed = await packApp(dir, {

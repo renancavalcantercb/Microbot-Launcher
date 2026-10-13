@@ -54,6 +54,9 @@ const ENVIRONMENT_RULES = Object.freeze({
 const KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const VERSION_PATTERN = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const JAVA_VERSION_PATTERN = /^\d{1,3}(?:\.\d{1,4}){0,4}$/;
+const RUNTIME_DIRECTORY = 'java-runtime';
 
 class DistributionProfileError extends Error {
     constructor(message) {
@@ -121,8 +124,22 @@ function validateSource(source) {
     return Object.freeze({ commit: source.commit, version: source.version });
 }
 
+// The Java runtime embedded in the installer (B-3.2): where it lives under the app resources and
+// the pin that the launcher verifies before every client start.
+function validateEmbeddedRuntime(runtime) {
+    plainObject(runtime, 'profile.embeddedRuntime', ['directory', 'javaVersion', 'imageSha256']);
+    if (runtime.directory !== RUNTIME_DIRECTORY) fail(`profile.embeddedRuntime.directory must be ${RUNTIME_DIRECTORY}`);
+    if (!JAVA_VERSION_PATTERN.test(runtime.javaVersion || '')) fail('profile.embeddedRuntime.javaVersion is invalid');
+    if (!SHA256_PATTERN.test(runtime.imageSha256 || '')) fail('profile.embeddedRuntime.imageSha256 must be a SHA-256');
+    return Object.freeze({
+        directory: runtime.directory,
+        javaVersion: runtime.javaVersion,
+        imageSha256: runtime.imageSha256
+    });
+}
+
 function validateProfile(raw, { requireSource = false } = {}) {
-    plainObject(raw, 'profile', ['schemaVersion', 'environment', 'identity', 'api', 'release', 'pluginRepository', 'source']);
+    plainObject(raw, 'profile', ['schemaVersion', 'environment', 'identity', 'api', 'release', 'pluginRepository', 'source', 'embeddedRuntime']);
     if (raw.schemaVersion !== PROFILE_SCHEMA_VERSION) fail(`profile.schemaVersion must be ${PROFILE_SCHEMA_VERSION}`);
     if (!PROFILE_NAMES.includes(raw.environment)) fail('profile.environment must be staging or production');
     const environment = raw.environment;
@@ -183,6 +200,11 @@ function validateProfile(raw, { requireSource = false } = {}) {
     if (raw.source !== undefined) source = validateSource(raw.source);
     else if (requireSource) fail('profile.source is required in an embedded profile');
 
+    // A distributed launcher always embeds its runtime; a source profile never carries the pin.
+    let embeddedRuntime;
+    if (raw.embeddedRuntime !== undefined) embeddedRuntime = validateEmbeddedRuntime(raw.embeddedRuntime);
+    else if (requireSource) fail('profile.embeddedRuntime is required in an embedded profile');
+
     return Object.freeze({
         schemaVersion: PROFILE_SCHEMA_VERSION,
         environment,
@@ -200,7 +222,8 @@ function validateProfile(raw, { requireSource = false } = {}) {
             publicKeyId: pluginKeyId,
             publicKey: pluginPublicKey
         }),
-        ...(source ? { source } : {})
+        ...(source ? { source } : {}),
+        ...(embeddedRuntime ? { embeddedRuntime } : {})
     });
 }
 
@@ -226,8 +249,8 @@ function loadProfileSource({ fs, path, root, name }) {
 
 // The embedded file is the validated profile plus the source it was built from. JSON key order
 // is fixed here so two builds of one commit embed byte-identical profiles.
-function serializeEmbeddedProfile(profile, source) {
-    const embedded = validateProfile({ ...profile, source }, { requireSource: true });
+function serializeEmbeddedProfile(profile, source, embeddedRuntime) {
+    const embedded = validateProfile({ ...profile, source, embeddedRuntime }, { requireSource: true });
     return `${JSON.stringify({
         schemaVersion: embedded.schemaVersion,
         environment: embedded.environment,
@@ -235,7 +258,8 @@ function serializeEmbeddedProfile(profile, source) {
         api: embedded.api,
         release: embedded.release,
         pluginRepository: embedded.pluginRepository,
-        source: embedded.source
+        source: embedded.source,
+        embeddedRuntime: embedded.embeddedRuntime
     }, null, 2)}\n`;
 }
 
@@ -275,6 +299,7 @@ function applyDistributionProfile(productConfig, profile) {
             environment: profile.environment,
             userDataDirectoryName: profile.identity.userDataDirectoryName,
             clientHomeDirectoryName: profile.identity.clientHomeDirectoryName,
+            embeddedRuntime: profile.embeddedRuntime || null,
             source: profile.source || null
         })
     });
@@ -314,6 +339,7 @@ module.exports = {
     PROFILE_FILE,
     PROFILE_NAMES,
     PROFILE_SCHEMA_VERSION,
+    RUNTIME_DIRECTORY,
     applyDistributionProfile,
     clientHomeDirectory,
     isLocked,

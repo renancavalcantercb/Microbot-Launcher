@@ -27,6 +27,7 @@ module.exports = async function (deps) {
     const { ProfilePrivacyPolicy } = require(
         path.join(__dirname, 'profile-privacy-policy.js')
     );
+    const embeddedRuntimeLib = require(path.join(__dirname, 'embedded-runtime.js'));
     const { TELEMETRY_PROGRAM_ARG, withTelemetryVmArg } = require(
         path.join(__dirname, 'telemetry-flags.js')
     );
@@ -349,7 +350,55 @@ module.exports = async function (deps) {
         };
     }
 
-    function probeJava(callback) {
+    // Java runtime resolution (B-3.2). A distributed launcher runs only the runtime embedded in
+    // its installer, verified against the pin in its profile; if that fails the client is not
+    // started and the system Java is never used. A development checkout uses the Java on PATH.
+    function resolveEmbeddedRuntime() {
+        if (!distributionLocked) return null;
+        const pin = productConfig?.distribution?.embeddedRuntime;
+        if (!pin) {
+            throw new embeddedRuntimeLib.RuntimeIntegrityError(
+                'this launcher build has no embedded Java runtime configured'
+            );
+        }
+        const runtimeDir =
+            deps.embeddedRuntimeDirectory || path.join(process.resourcesPath || '', pin.directory);
+        const verified = embeddedRuntimeLib.verifyEmbeddedRuntime({
+            fs,
+            path,
+            runtimeDir,
+            expected: { javaVersion: pin.javaVersion, imageSha256: pin.imageSha256 }
+        });
+        const bin = path.join(runtimeDir, 'bin');
+        return {
+            runtimeDir,
+            verified,
+            probeExecutable: path.join(bin, process.platform === 'win32' ? 'java.exe' : 'java'),
+            launchExecutable: path.join(bin, process.platform === 'win32' ? 'javaw.exe' : 'java')
+        };
+    }
+
+    // The Java child never inherits options that load agents or change the JVM from the
+    // environment. Only the child's environment is built without them.
+    function javaChildEnvironment(environment) {
+        const { environment: clean, removed } = embeddedRuntimeLib.sanitizeJavaEnvironment(environment);
+        if (removed.length > 0) {
+            log.warn(`Java environment options were not passed to the client: ${removed.join(', ')}`);
+        }
+        return clean;
+    }
+
+    function runtimeProblem(error) {
+        return {
+            kind: 'runtime-integrity',
+            title: 'Java Runtime Damaged',
+            message: error.message,
+            recovery: 'Reinstall Microbot Cut Launcher. The client was not started and no other Java is used.',
+            offerDownload: false
+        };
+    }
+
+    function probeJava(callback, embedded = null) {
         let called = false;
         let timeoutHandle = null;
         const finish = (result) => {
@@ -360,7 +409,15 @@ module.exports = async function (deps) {
         };
 
         try {
-            const javaProcess = spawn('java', javaRuntime.PROBE_ARGS);
+            const javaProcess = embedded
+                ? spawn(embedded.probeExecutable, javaRuntime.PROBE_ARGS, {
+                      env: javaChildEnvironment({ ...launchEnvironmentFor(productConfig, process.env) }),
+                      windowsHide: true
+                  })
+                : spawn('java', javaRuntime.PROBE_ARGS, {
+                      env: javaChildEnvironment({ ...process.env }),
+                      windowsHide: true
+                  });
             let output = '';
             const TIMEOUT_MS = 5000;
 
@@ -610,10 +667,10 @@ module.exports = async function (deps) {
         try {
             jarProcess = spawn(executable, commandArgs, {
                 detached: true,
-                env: {
+                env: javaChildEnvironment({
                     ...launchEnvironmentFor(productConfig, process.env),
                     ...launchEnvironment
-                },
+                }),
                 ...extraArgs
             });
             clientLifecycle?.markStarted?.(launchId, jarProcess.pid);
@@ -693,6 +750,22 @@ module.exports = async function (deps) {
 
     function checkJavaAndRunJar(commandArgs, secrets = [], launchEnvironment = {}, releaseAuthorization = () => {}, releaseVersion = null) {
         const launchId = clientLifecycle?.beginLaunch?.() ?? null;
+        let embedded = null;
+        try {
+            embedded = resolveEmbeddedRuntime();
+            if (embedded) {
+                log.info(
+                    `Embedded Java runtime verified: ${embedded.verified.javaVersion}, ${embedded.verified.files} files.`
+                );
+            }
+        } catch (error) {
+            if (!(error instanceof embeddedRuntimeLib.RuntimeIntegrityError)) throw error;
+            clientLifecycle?.markFailed?.(launchId);
+            clientReleaseHealth?.fail?.(releaseVersion, 'embedded Java runtime failed verification');
+            releaseAuthorization();
+            showLaunchProblem(runtimeProblem(error), { stderr: '', secrets });
+            return;
+        }
         probeJava(({ runtime, problem }) => {
             if (problem) {
                 clientLifecycle?.markFailed?.(launchId);
@@ -728,7 +801,23 @@ module.exports = async function (deps) {
             if (!javaRuntime.supportsZgc(runtime)) {
                 log.info(`${javaRuntime.describeRuntime(runtime)} cannot use ZGC; launching without ZGC flags.`);
             }
-            const executable = javaRuntime.launcherExecutable(runtime, process.platform, fs.existsSync);
+            if (embedded) {
+                const reported = String(runtime.home || '');
+                const same = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+                if (!reported || !same(reported, embedded.runtimeDir)) {
+                    clientLifecycle?.markFailed?.(launchId);
+                    clientReleaseHealth?.fail?.(releaseVersion, 'embedded Java runtime reported an unexpected home');
+                    releaseAuthorization();
+                    showLaunchProblem(
+                        runtimeProblem(new Error('The embedded Java runtime reported an unexpected location.')),
+                        { runtime, secrets }
+                    );
+                    return;
+                }
+            }
+            const executable = embedded
+                ? embedded.launchExecutable
+                : javaRuntime.launcherExecutable(runtime, process.platform, fs.existsSync);
             log.info('Java runtime is compatible, running the JAR...');
             executeJar(
                 executable,
@@ -740,7 +829,7 @@ module.exports = async function (deps) {
                 launchId,
                 releaseVersion
             );
-        });
+        }, embedded);
     }
 
     return { probeJava, checkJavaAndRunJar, showLaunchProblem };

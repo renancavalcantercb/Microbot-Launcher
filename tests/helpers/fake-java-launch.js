@@ -35,7 +35,7 @@ function fakeChild({ output = '', exitCode = null } = {}) {
  * Harness for the jar-executor with a fake `spawn`: the first call is the Java probe (answers
  * with a Java 17 banner), the next one is the client process (stays running). Nothing real runs.
  */
-function createFakeLaunchHarness({ spawnEnvironment = {}, extraDeps = {} } = {}) {
+function createFakeLaunchHarness({ spawnEnvironment = {}, extraDeps = {}, javaSettings = JAVA_SETTINGS_OUTPUT } = {}) {
     const handlers = {};
     const spawnCalls = [];
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-launch-'));
@@ -50,7 +50,7 @@ function createFakeLaunchHarness({ spawnEnvironment = {}, extraDeps = {} } = {})
             spawnCalls.push({ command, args, options, env: { ...process.env, ...spawnEnvironment } });
             const isProbe = args.includes('-version');
             return isProbe
-                ? fakeChild({ output: JAVA_SETTINGS_OUTPUT, exitCode: 0 })
+                ? fakeChild({ output: javaSettings, exitCode: 0 })
                 : fakeChild();
         },
         path,

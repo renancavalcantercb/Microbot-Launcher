@@ -10,6 +10,7 @@ const profileLib = require('../libs/distribution-profile');
 
 const root = path.join(__dirname, '..');
 const SOURCE = { commit: 'a'.repeat(40), version: '3.2.11' };
+const RUNTIME = { directory: 'java-runtime', javaVersion: '17.0.20.1', imageSha256: 'e'.repeat(64) };
 const log = () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() });
 
 function profile(name) {
@@ -36,7 +37,7 @@ function rejection(mutate, name = 'staging') {
 function lockedConfig(name) {
     return profileLib.applyDistributionProfile(
         baseProductConfig,
-        profileLib.validateProfile({ ...profile(name), source: SOURCE }, { requireSource: true })
+        profileLib.validateProfile({ ...profile(name), source: SOURCE, embeddedRuntime: RUNTIME }, { requireSource: true })
     );
 }
 function withTempDir(callback) {
@@ -232,8 +233,8 @@ describe('profile validation fails closed', () => {
 
 describe('embedded profile', () => {
     test('is serialized deterministically and read back unchanged', () => withTempDir((dir) => {
-        const text = profileLib.serializeEmbeddedProfile(profile('staging'), SOURCE);
-        expect(profileLib.serializeEmbeddedProfile(profile('staging'), SOURCE)).toBe(text);
+        const text = profileLib.serializeEmbeddedProfile(profile('staging'), SOURCE, RUNTIME);
+        expect(profileLib.serializeEmbeddedProfile(profile('staging'), SOURCE, RUNTIME)).toBe(text);
         fs.writeFileSync(path.join(dir, profileLib.PROFILE_FILE), text);
         const loaded = profileLib.loadEmbeddedProfile({ fs, path, root: dir });
         expect(loaded.environment).toBe('staging');
@@ -267,10 +268,38 @@ describe('embedded profile', () => {
             environment: 'production',
             userDataDirectoryName: null,
             clientHomeDirectoryName: null,
+            embeddedRuntime: RUNTIME,
             source: SOURCE
         });
         expect(config.updateFilesBase).toBeNull();
         expect(config.updateApiBase).toBeNull();
+    });
+});
+
+describe('embedded runtime pin in the profile', () => {
+    const embedded = (mutate) => {
+        const raw = clone({ ...profile('staging'), source: SOURCE, embeddedRuntime: RUNTIME });
+        mutate(raw);
+        return () => profileLib.validateProfile(raw, { requireSource: true });
+    };
+
+    test('an embedded profile must carry the runtime pin', () => {
+        expect(embedded((p) => { delete p.embeddedRuntime; })).toThrow('embeddedRuntime is required');
+    });
+
+    test.each([
+        ['another directory', (p) => { p.embeddedRuntime.directory = '../java'; }, 'directory'],
+        ['a bad digest', (p) => { p.embeddedRuntime.imageSha256 = 'abc'; }, 'SHA-256'],
+        ['a bad version', (p) => { p.embeddedRuntime.javaVersion = 'latest'; }, 'javaVersion'],
+        ['an unknown field', (p) => { p.embeddedRuntime.fallback = 'system'; }, 'unknown field']
+    ])('rejects %s', (_label, mutate, fragment) => {
+        expect(embedded(mutate)).toThrow(fragment);
+    });
+
+    test('the source profiles do not carry the pin (it comes from config/java-runtime.json)', () => {
+        for (const name of ['staging', 'production']) {
+            expect(profile(name).embeddedRuntime).toBeUndefined();
+        }
     });
 });
 

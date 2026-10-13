@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
 const crypto = require('crypto');
+const { createRuntimeFixture } = require('./helpers/runtime-fixture');
 
 function userHome() {
     try {
@@ -410,7 +411,8 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
 
         expect(harness.spawnCalls).toHaveLength(2);
-        expect(harness.spawnCalls[0].options).toBeUndefined();
+        // The probe runs with the Java options of the environment removed (child only).
+        expect(harness.spawnCalls[0].options).toEqual({ env: expect.any(Object), windowsHide: true });
         const launchCall = harness.spawnCalls[1];
         expect(launchCall.options.env).toEqual(
             expect.objectContaining({
@@ -528,25 +530,21 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
     });
 
     test('a distributed launcher uses its embedded plugin repository and drops local overrides', async () => {
+        const runtimeFixture = createRuntimeFixture();
         const profileLib = require('../libs/distribution-profile');
         const profile = profileLib.loadProfileSource({ fs, path, root: path.join(__dirname, '..'), name: 'staging' });
         const lockedConfig = profileLib.applyDistributionProfile(
             require('../product-config'),
-            { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' } }
+            { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' }, embeddedRuntime: runtimeFixture.pin }
         );
         process.env.DEBUG = 'true';
         process.env.MICROBOT_CUT_PLUGIN_DEV = 'true';
         process.env.MICROBOT_CUT_PLUGIN_REPOSITORY_ENABLED = 'true';
         process.env.MICROBOT_CUT_PLUGIN_MANIFEST_URL = 'https://evil.example/catalog.json';
         process.env.MICROBOT_CUT_API_BASE_URL = 'http://localhost:5173/api/v1';
-        const probeOutput = [
-            '    java.home = /opt/fake-jdk',
-            '    java.version = 17.0.1',
-            '    sun.arch.data.model = 64',
-            'openjdk version "17.0.1"'
-        ].join('\n');
-        const harness = fakeRuntimeHarness(probeOutput);
+        const harness = fakeRuntimeHarness(runtimeFixture.probeOutput);
         harness.deps.productConfig = lockedConfig;
+        harness.deps.embeddedRuntimeDirectory = runtimeFixture.dir;
 
         try {
             await launch(harness);
@@ -568,37 +566,37 @@ describe('open-client launch diagnostics with real Java runtimes', () => {
             expect(launchCall.options.env.MICROBOT_CUT_CLIENT_TICKET).toBe('header.payload.signature');
         } finally {
             delete process.env.MICROBOT_CUT_API_BASE_URL;
+            runtimeFixture.cleanup();
         }
     });
 
     describe('distributed launcher: client home and JAVA_TOOL_OPTIONS', () => {
-        const probeOutput = [
-            '    java.home = /opt/fake-jdk',
-            '    java.version = 17.0.1',
-            '    sun.arch.data.model = 64',
-            'openjdk version "17.0.1"'
-        ].join('\n');
-
-        function lockedConfigFor(name) {
+        function lockedConfigFor(name, runtimeFixture) {
             const profileLib = require('../libs/distribution-profile');
             const profile = profileLib.loadProfileSource({ fs, path, root: path.join(__dirname, '..'), name });
             return {
                 profile,
                 config: profileLib.applyDistributionProfile(
                     require('../product-config'),
-                    { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' } }
+                    { ...profile, source: { commit: 'c'.repeat(40), version: '3.2.11' }, embeddedRuntime: runtimeFixture.pin }
                 )
             };
         }
 
         async function launchLocked(name) {
-            const { profile, config } = lockedConfigFor(name);
+            const runtimeFixture = createRuntimeFixture();
+            const { profile, config } = lockedConfigFor(name, runtimeFixture);
             const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'locked-data-'));
-            const harness = fakeRuntimeHarness(probeOutput);
+            const harness = fakeRuntimeHarness(runtimeFixture.probeOutput);
             harness.deps.productConfig = config;
             harness.deps.productDataDir = dataDir;
-            await launch(harness);
-            await new Promise((resolve) => setTimeout(resolve, 50));
+            harness.deps.embeddedRuntimeDirectory = runtimeFixture.dir;
+            try {
+                await launch(harness);
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            } finally {
+                runtimeFixture.cleanup();
+            }
             return { profile, dataDir, call: harness.spawnCalls[1] };
         }
 
