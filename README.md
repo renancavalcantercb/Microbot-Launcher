@@ -75,6 +75,31 @@ the staging anchor. Production plugins trust only the separate
 <img width="1915" height="1197" alt="image" src="https://github.com/user-attachments/assets/dfa1f620-ed5a-409c-97f0-f2c6e86e9a8a" />
 
 
+## Embedded Java runtime
+
+A distributed launcher runs the client only on the Java runtime embedded in its installer (Eclipse Temurin
+17, reduced with `jlink`). It never falls back to a Java found on the machine. Licenses and provenance are in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
+- **Pin:** `config/java-runtime.json` (version, archive digest, signing key fingerprint, source commits,
+  module list, image digest).
+- **Build the image** (Windows, `gpg` and `gpgv` on the PATH):
+  `node scripts/build-java-runtime.js` downloads the official archive, checks its SHA-256 against the pin and
+  the publisher's checksum file, verifies the publisher's signature, runs `jlink` from the archive itself and
+  writes `runtime-manifest.json`. It stops on any mismatch. The image goes to
+  `.release-work/java-runtime/image`; `--archive`, `--signature` and `--checksum` take local copies. Two
+  builds of the same archive give the same `imageSha256`. `--write-pin` records the digest after a reviewed
+  runtime change.
+- **Embedding:** `package.json` `build.extraResources` copies the image to `resources/java-runtime`. The
+  embedded distribution profile pins the Java version and the image digest. `beforePack` and the packed-app
+  check both verify the image against that pin.
+- **At run time:** before every client start the launcher checks every file of the runtime (name, size,
+  SHA-256, no extra files). If anything differs, or the runtime is missing, the client is not started and the
+  user is told to reinstall. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` are removed from the
+  Java child's environment only.
+- **Updating Java:** a runtime update is a launcher release. Review each new 17.0.x quarterly (and for high
+  severity CVEs), change the pin, rebuild, run the tests and the compatibility checks, then release.
+
 ## Prerequisites
 Before you begin, ensure you have the following installed on your machine:
 - [Node.js](https://nodejs.org/) (preferably the latest version)
