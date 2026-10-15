@@ -9,6 +9,7 @@
     "dev:guardian": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1 -PluginDevelopment -PluginJar ..\\microbot-cut-plugins\\plugins\\remote-guardian\\build\\libs\\remote-guardian-0.1.1.jar -PluginDevelopmentJarName RemoteControlPlugin.jar",
     "dev:essentials": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1 -PluginDevelopment -PluginJar ..\\microbot-cut-plugins\\plugins\\cut-essentials\\build\\libs\\cut-essentials-0.1.0.jar -PluginDevelopmentJarName CutEssentialsPlugin.jar",
     "dev:birdhouse": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1 -PluginDevelopment -PluginJar ..\\microbot-cut-plugins\\plugins\\cut-bird-house\\build\\libs\\cut-bird-house-1.0.0.jar -PluginDevelopmentJarName CutBirdHousePlugin.jar",
+    "dev:farming": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1 -PluginDevelopment -PluginJar ..\\microbot-cut-plugins\\plugins\\cut-farming\\build\\libs\\cut-farming-1.0.0.jar -PluginDevelopmentJarName CutFarmingPlugin.jar",
     "dev:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-product-production.ps1",
     "dev:plugin-staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-plugin-staging.ps1",
     "dev:mock": "cross-env DEBUG=true MOCK_AUTH=1 MOCK_USERS='demo@microbot.com:DemoPassword123,test@example.com:TestPassword123' electron .",
